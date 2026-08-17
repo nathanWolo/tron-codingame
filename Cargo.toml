@@ -3,6 +3,13 @@ name = "tron_codingame"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["local"]
+# Dummy-opponent `--bench` / `--profile` in src/local.rs. Off in a CodinGame
+# paste (their Cargo.toml has no features). SPRT still uses the default so
+# `cargo run --release -- --bench` keeps working.
+local = []
+
 [[bin]]
 name = "tron"
 path = "src/main.rs"

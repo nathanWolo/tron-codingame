@@ -6,7 +6,7 @@
 #   # edit src/main.rs ...
 #   tools/sprt.sh                   # default SPRT [0, 10] Elo
 #   tools/sprt.sh --elo0 0 --elo1 5 --budget-ms 30
-#   tools/sprt.sh --fixed --max-games 200
+#   tools/sprt.sh --players 3 --fixed --max-games 120
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

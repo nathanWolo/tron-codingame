@@ -35,18 +35,22 @@ A legal first move is any of `UP` `DOWN` `LEFT` `RIGHT` that stays on the board.
 
 ```
 tron_codingame/
-  Cargo.toml          # release: opt-level 3, LTO, abort-on-panic
-  src/main.rs         # entire agent + local bench/profile
+  Cargo.toml          # release: opt-level 3, LTO, abort-on-panic; default `local` feature
+  src/main.rs         # CodinGame paste (agent only)
+  src/local.rs        # `--bench` / `--profile` dummy-opponent self-play
+  src/voronoi_tests.rs # `cargo test` (not pasted)
   tools/sprt.py           # SPRT referee (baseline vs dev binaries)
+  tools/watch.py          # live board: candidate vs baseline
   tools/openings_1v1.json # frozen 2-player CG spawns
   tools/openings_3p.json
   tools/openings_4p.json
   tools/save_baseline.sh
   tools/sprt.sh
+  tools/watch.sh
   README.md
 ```
 
-No crates.io dependencies. CodinGame compiles a single Rust file with `std` only.
+No crates.io dependencies. CodinGame compiles a single Rust file with `std` only. Paste **`src/main.rs` only** — it is under the 100k-character IDE limit. `src/local.rs` and `src/voronoi_tests.rs` stay in this repo.
 
 ### Run locally
 
@@ -54,6 +58,8 @@ No crates.io dependencies. CodinGame compiles a single Rust file with `std` only
 cargo run --release                 # CodinGame stdin/stdout loop
 cargo run --release -- --bench      # self-play vs baseline bots
 cargo run --release -- --profile    # eval throughput + one timed search
+cargo test --bin tron               # Voronoi / search tests
+tools/sprt.sh                       # candidate binary vs frozen baseline
 ```
 
 Release profile is aggressive because the same file is what you submit:
@@ -69,11 +75,11 @@ panic = "abort"
 ### Submit to CodinGame
 
 1. Open Tron Battle, language **Rust**.
-2. Paste `src/main.rs`.
-3. Play a few IDE games. Stderr lines look like `DOWN mm 1840 75ms` (direction, last completed search score, milliseconds used). Open 1v1 and FFA both print that leftover score; isolated fill / endgame do not.
+2. Paste `src/main.rs` (not `local.rs` or the tests).
+3. Play a few IDE games. Stderr lines look like `DOWN mm 1840 75ms n=12345` (direction, last completed search score, milliseconds used, nodes). Open 1v1 and FFA both print that leftover score; isolated fill / endgame do not.
 4. If you timeout, lower `TURN_BUDGET_MS` / `FIRST_TURN_BUDGET_MS` at the top of the file.
 
-`--bench` and `--profile` never run on CodinGame (no CLI args there).
+`--bench` and `--profile` are `src/local.rs` (default `local` feature). The CodinGame judge passes no argv and compiles only the pasted file, so they never run there. Engine-vs-engine testing is `tools/sprt.sh`.
 
 ---
 
@@ -112,6 +118,15 @@ tools/sprt.sh                   # default: H0=0 Elo, H1=+10 Elo, α=β=0.05, 20 
 ```
 
 `tools/sprt.sh` rebuilds `target/release/tron` as **dev** and pits it against `bin/tron-baseline`. Extra flags are forwarded to `tools/sprt.py`.
+
+### Watch a game
+
+```bash
+tools/watch.sh                 # build candidate, then open a 30×20 window
+tools/watch.sh --budget-ms 20  # same think time as default SPRT
+```
+
+Cyan is the candidate, orange is the baseline. The overlay tints empty cells by Voronoi owner; the sidebar switches **OPEN** (shared space, Voronoi eval) vs **CUT** (separate chambers, fill eval). Space pauses, `N` new game, `R` replay the same opening, `S` steps one ply.
 
 ### Hypotheses
 
@@ -163,10 +178,12 @@ Both engines get `--budget-ms N` and `TRON_BUDGET_MS=N` so they use a fixed time
 Status line:
 
 ```
-n=  80  44-2-34  56.2% vs 50.0%  Elo  +22.3 ±  39.1  LOS  72.4%  LLR  +0.81 [-2.94,+2.94]  SPRT[0,10] 2p
+n=  80  44-2-34  56.2% vs 50.0%  Elo  +22.3 ±  39.1  LOS  72.4%  LLR  +0.81 [-2.94,+2.94]  SPRT[0,10] 2p  NPS 610k vs 98k (6.2x)
 ```
 
 The percentage is the candidate’s mean score against the fair **1/N** prior. `LOS` is P(dev Elo > 0 | equal field), i.e. P(true win rate > 1/N), from a normal approximation. Do not ship on LOS alone; wait for SPRT to accept H1.
+
+`NPS` is search nodes per second, summed over turns that reported `n=` on stderr (the agent prints `DIR mm score Tms n=NODES` after iterative deepening). Old baselines that do not print `n=` show as `n/a` until you freeze a new one with `tools/save_baseline.sh`. The ratio is dev/baseline; >1 means the candidate is searching more nodes in the same budget.
 
 Logs (`--log`) are JSONL, one seat-rotated block per line. Binaries and logs: `bin/tron-*` and `sprt-logs/` are gitignored.
 
@@ -253,7 +270,9 @@ The design follows the 2010 Google AI Challenge Tron literature (especially a1k0
 
 ### 1. Voronoi territory
 
-For each live player, BFS from the **empty neighbours of their head** (the head cell itself is occupied). That gives a distance map over empty cells.
+Empty cells are partitioned by who can reach them first. Distances are **row-bitboard waves**: each living head’s empty neighbours are a 30-bit seed, then every orthogonal step is a shift/OR across the 20 occupancy rows. A cell reached by exactly one bike that wave is that bike’s territory; a cell reached by two or more is a tie (unowned). Reachability is a separate independent flood — opponent-owned empty cells are still walkable, matching the old per-player BFS.
+
+The head cell itself is occupied, so search starts from its empty 4-neighbours at distance 1.
 
 A cell belongs to a player if they are **strictly closest**. Ties are contested and owned by nobody. We also count:
 
@@ -383,7 +402,7 @@ When only two remain, the game becomes the 1v1 path (minimax + endgame fill). De
 
 `main_opponent` is the live enemy whose head we can reach soonest (BFS). FFA uses that head as the move-ordering target.
 
-SPRT[0,10] vs the previous greedy-reply `search_ffa` (20 ms/turn, 1 candidate vs N−1 baselines): **+94.5 ± 16.3 Elo** in 3p (46.3% vs 33.3%) and **+38.8 ± 10.0 Elo** in 4p (29.4% vs 25.0%).
+SPRT[0,10] vs the previous greedy-reply FFA search (20 ms/turn, 1 candidate vs N−1 baselines): **+94.5 ± 16.3 Elo** in 3p (46.3% vs 33.3%) and **+38.8 ± 10.0 Elo** in 4p (29.4% vs 25.0%).
 
 ---
 
@@ -428,7 +447,7 @@ Representative results (25 ms, 12 games, noisy but directional):
 | voronoi-1ply | ~67–80% |
 | FFA vs mixed (greedy / wall / voronoi) | weak (~12% in 8 games; 25% is par) |
 
-`--profile` reports evals/ms (tens of evals per millisecond in release; Voronoi is the bottleneck) and one timed `choose_move`. Midgame 1v1 often reaches **depth 8–11** in the 75 ms box.
+`--profile` reports evals/ms (hundreds of evals per millisecond in release after the bitboard Voronoi) and one timed `choose_move`. Midgame 1v1 often reaches **depth 8–11** in the 75 ms box.
 
 If both players are still alive after 900 rounds, the bench awards the larger flood fill (it used to default to player 0, which biased colour-swap stats).
 
@@ -441,7 +460,6 @@ If both players are still alive after 900 rounds, the bench awards the larger fl
 - **Visit stamps** instead of `memset` on flood fills (`Scratch::next_generation`).
 - **Integer-only eval**, no transposition table. A Zobrist TT was tried and measured ~0 Elo (hits were almost all previous-iteration depth-misses; sequential Tron transposes rarely), so it was reverted. Four-wide branching plus alpha-beta is enough on a 600-cell board.
 - **Debug** goes to stderr (`eprintln!`), which CodinGame shows in the IDE and ignores for scoring.
-- Dead helpers (`search_endgame`, `search_ffa`, `play_opponents_greedy`, `rollout_score`, …) remain in the file under `#![allow(dead_code)]` from earlier experiments. They are unused by `choose_move` today.
 
 ---
 
@@ -457,12 +475,11 @@ If both players are still alive after 900 rounds, the bench awards the larger fl
 
 ## Ideas that would still help
 
-1. **Faster Voronoi** — eval is the nodes-per-second bottleneck; a cheaper distance / territory pass would buy real depth.
-2. **True articulation points (Tarjan) + chamber tree** instead of the local 8-ring cut test; this is the contest-winning eval idea from a1k0n (ignore non-battlefront chambers when you must choose).
-3. **Checkerboard bound** on fillable space (surplus of one colour is unfillable).
-4. **Quiescence / search extension** when heads are adjacent or a cut appears in one ply.
-5. **Less-paranoid FFA** — Max-N or a mixed “they fill, they attack” model if the coalition assumption is too scared in 4p.
-6. **Self-play tuning** of the open-game weights (`50 / 12 / 3 / 6 / 4`) against the voronoi-1ply baseline and against copies of itself.
+1. **True articulation points (Tarjan) + chamber tree** instead of the local 8-ring cut test; this is the contest-winning eval idea from a1k0n (ignore non-battlefront chambers when you must choose).
+2. **Checkerboard bound** on fillable space (surplus of one colour is unfillable).
+3. **Quiescence / search extension** when heads are adjacent or a cut appears in one ply.
+4. **Less-paranoid FFA** — Max-N or a mixed “they fill, they attack” model if the coalition assumption is too scared in 4p.
+5. **Self-play tuning** of the open-game weights (`50 / 12 / 3 / 6 / 4`) against the voronoi-1ply baseline and against copies of itself.
 
 ---
 

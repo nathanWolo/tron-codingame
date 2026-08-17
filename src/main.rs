@@ -1,7 +1,9 @@
 //! CodinGame Tron Battle agent.
 //!
-//! Paste this single file into the CodinGame Rust IDE. Local extras:
-//! `cargo run --release -- --bench` and `--profile`.
+//! Paste this single file into the CodinGame Rust IDE. Local extras live
+//! beside it and are not part of the paste: `src/local.rs` (`--bench` /
+//! `--profile`) and `src/voronoi_tests.rs` (`cargo test`). Engine-vs-engine
+//! SPRT is `tools/sprt.sh`, not this file.
 //!
 //! **1v1:** iterative-deepening alpha-beta with a Voronoi territory eval.
 //! When the two bikes can no longer reach each other, switch to greedy
@@ -10,17 +12,19 @@
 //! [`eval_ffa`], every other living bike colludes to minimize it. Deep 1v1
 //! minimax (frozen extra bikes) is not used.
 
-#![allow(dead_code)]
-
 use std::io::{self, BufRead, Write};
+#[cfg(any(test, feature = "local"))]
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 /// How many choose_move calls saw the two duelists in separate chambers.
+#[cfg(any(test, feature = "local"))]
 static SEPARATED_MOVE_COUNT: AtomicU32 = AtomicU32::new(0);
 /// Total choose_move calls (for the bench separated-rate print).
+#[cfg(any(test, feature = "local"))]
 static CHOOSE_MOVE_COUNT: AtomicU32 = AtomicU32::new(0);
 /// Separated calls that happened with almost-empty boards (suspicious).
+#[cfg(any(test, feature = "local"))]
 static EARLY_SEPARATION_COUNT: AtomicU32 = AtomicU32::new(0);
 
 const WIDTH: i32 = 30;
@@ -41,6 +45,9 @@ const MATE_SCORE: i32 = 1_000_000;
 /// Returned from search when the time budget is exhausted (not a real eval).
 const TIMEOUT_SCORE: i32 = i32::MIN / 4;
 
+/// Bits 0..29 are on the 30-wide board; 30 and 31 stay unused.
+const COL_MASK: u32 = (1 << 30) - 1;
+
 const TURN_BUDGET_MS: u64 = 75;
 const FIRST_TURN_BUDGET_MS: u64 = 85;
 
@@ -55,8 +62,8 @@ fn in_bounds(col: i32, row: i32) -> bool {
 
 /// Flatten `(col, row)` to `row * 30 + col` in `0..600`.
 ///
-/// Indexes `Scratch` arrays (`distance`, `visited_stamp`, `owner`, `bfs_queue`)
-/// so BFS / Voronoi / fill can store one value per cell without a 2D array.
+/// Indexes `Scratch` arrays (`visited_stamp`, `bfs_queue`) so flood / fill
+/// can store one value per cell without a 2D array.
 #[inline]
 fn cell_index(col: i32, row: i32) -> usize {
     (row * WIDTH + col) as usize
@@ -241,20 +248,16 @@ impl State {
     }
 }
 
-/// Scratch space for BFS / flood / Voronoi so we do not allocate in search.
+/// Scratch space for flood / fill so we do not allocate in search.
 ///
 /// One instance is created in [`codingame`] / `--bench` / `--profile` and
-/// reused every turn. Eval is the NPS bottleneck; these buffers avoid 600-cell
-/// `Vec` allocations inside [`negamax_1v1`] leaves.
+/// reused every turn. Voronoi no longer uses these buffers (row bitboards
+/// live on the stack); fill / flood still need visit stamps.
 struct Scratch {
-    /// Per-player distance maps, `UNREACHABLE` if not reached.
-    distance: [[u16; BOARD_CELLS]; MAX_PLAYERS],
     bfs_queue: [u16; BOARD_CELLS],
     /// Generation stamp per cell; compared to `visit_generation` instead of clearing.
     visited_stamp: [u32; BOARD_CELLS],
     visit_generation: u32,
-    /// Voronoi owner of each empty cell, or -1.
-    owner: [i8; BOARD_CELLS],
 }
 
 impl Scratch {
@@ -262,11 +265,9 @@ impl Scratch {
     /// ([`codingame`], [`bench`], [`profile`]).
     fn new() -> Self {
         Self {
-            distance: [[UNREACHABLE; BOARD_CELLS]; MAX_PLAYERS],
             bfs_queue: [0; BOARD_CELLS],
             visited_stamp: [0; BOARD_CELLS],
             visit_generation: 1,
-            owner: [-1; BOARD_CELLS],
         }
     }
 
@@ -283,59 +284,124 @@ impl Scratch {
     }
 }
 
-/// Breadth-first distances from `player` into empty cells.
-///
-/// The head cell itself is occupied, so the search starts from its empty
-/// 4-neighbours at distance 1. Unreached cells stay [`UNREACHABLE`].
-/// `distance` and `queue` are caller-owned so Voronoi can reuse one queue.
-///
-/// **Where:** [`compute_voronoi`] (once per living player), [`main_opponent`],
-/// and [`shares_space`].
-/// **Why:** territory, “can we still meet?”, and “who is closest?” all need
-/// empty-cell distances from a head.
-fn bfs_from_player(
-    state: &State,
-    player: usize,
-    distance: &mut [u16; BOARD_CELLS],
-    queue: &mut [u16; BOARD_CELLS],
-) {
-    distance.fill(UNREACHABLE);
-    if !state.is_alive(player) {
-        return;
+/// Empty-cell row masks: bit `col` set iff `(col, row)` is on-board and free.
+#[inline]
+fn empty_rows(state: &State) -> [u32; 20] {
+    let mut empty = [0u32; 20];
+    for row in 0..20 {
+        empty[row] = !state.occupied.bits[row] & COL_MASK;
     }
-    let mut queue_head = 0usize;
-    let mut queue_tail = 0usize;
+    empty
+}
+
+/// One orthogonal step from `src` into `empty` cells.
+#[inline]
+fn expand_mask(src: &[u32; 20], empty: &[u32; 20]) -> [u32; 20] {
+    let mut out = [0u32; 20];
+    for row in 0..20 {
+        let mut bits = (src[row] << 1) | (src[row] >> 1);
+        if row > 0 {
+            bits |= src[row - 1];
+        }
+        if row < 19 {
+            bits |= src[row + 1];
+        }
+        out[row] = bits & empty[row];
+    }
+    out
+}
+
+/// One orthogonal step, clipped to the 30-wide board (no occupancy mask).
+#[inline]
+fn expand_mask_board(src: &[u32; 20]) -> [u32; 20] {
+    let mut out = [0u32; 20];
+    for row in 0..20 {
+        let mut bits = (src[row] << 1) | (src[row] >> 1);
+        if row > 0 {
+            bits |= src[row - 1];
+        }
+        if row < 19 {
+            bits |= src[row + 1];
+        }
+        out[row] = bits & COL_MASK;
+    }
+    out
+}
+
+/// Empty 4-neighbours of `player`’s head, as a row mask. The head cell itself
+/// is occupied, so Voronoi / flood starts here at distance 1.
+fn head_seed(state: &State, player: usize, empty: &[u32; 20]) -> [u32; 20] {
+    let mut seed = [0u32; 20];
+    if !state.is_alive(player) {
+        return seed;
+    }
     let head_col = state.head_x[player] as i32;
     let head_row = state.head_y[player] as i32;
-    // Seed the queue with every empty neighbour of the head.
     for dir in 0..4 {
         let col = head_col + DIR_X[dir];
         let row = head_row + DIR_Y[dir];
-        if in_bounds(col, row) && !state.occupied.is_set(col, row) {
-            let index = cell_index(col, row);
-            distance[index] = 1;
-            queue[queue_tail] = index as u16;
-            queue_tail += 1;
+        if in_bounds(col, row) {
+            seed[row as usize] |= 1u32 << col;
         }
     }
-    while queue_head < queue_tail {
-        let index = queue[queue_head] as usize;
-        queue_head += 1;
-        let (col, row) = coords_from_index(index);
-        let next_dist = distance[index] + 1;
-        for dir in 0..4 {
-            let next_col = col + DIR_X[dir];
-            let next_row = row + DIR_Y[dir];
-            if in_bounds(next_col, next_row) && !state.occupied.is_set(next_col, next_row) {
-                let next_index = cell_index(next_col, next_row);
-                if distance[next_index] == UNREACHABLE {
-                    distance[next_index] = next_dist;
-                    queue[queue_tail] = next_index as u16;
-                    queue_tail += 1;
-                }
+    for row in 0..20 {
+        seed[row] &= empty[row];
+    }
+    seed
+}
+
+/// All empty cells reachable from `seed` (independent of other bikes).
+fn flood_mask(seed: &[u32; 20], empty: &[u32; 20]) -> [u32; 20] {
+    let mut filled = *seed;
+    loop {
+        let next = expand_mask(&filled, empty);
+        let mut changed = false;
+        for row in 0..20 {
+            let add = next[row] & !filled[row];
+            if add != 0 {
+                filled[row] |= add;
+                changed = true;
             }
         }
+        if !changed {
+            return filled;
+        }
     }
+}
+
+#[inline]
+fn mask_popcount(mask: &[u32; 20]) -> i32 {
+    mask.iter().map(|row| row.count_ones()).sum::<u32>() as i32
+}
+
+fn masks_overlap(left: &[u32; 20], right: &[u32; 20]) -> bool {
+    for row in 0..20 {
+        if left[row] & right[row] != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Sum of empty 4-neighbours over every cell in `owned` (a1k0n leftover edges).
+fn mask_edge_sum(owned: &[u32; 20], empty: &[u32; 20]) -> i32 {
+    let mut sum = 0u32;
+    for row in 0..20 {
+        let owned_row = owned[row];
+        if owned_row == 0 {
+            continue;
+        }
+        let empty_row = empty[row];
+        sum += (owned_row & (empty_row << 1)).count_ones();
+        sum += (owned_row & (empty_row >> 1)).count_ones();
+        if row > 0 {
+            sum += (owned_row & empty[row - 1]).count_ones();
+        }
+        if row < 19 {
+            sum += (owned_row & empty[row + 1]).count_ones();
+        }
+    }
+    sum as i32
 }
 
 /// Count empty cells reachable from `player`, ignoring who else can reach them.
@@ -343,8 +409,8 @@ fn bfs_from_player(
 /// This is a chamber-size / remaining-space metric, not Voronoi. Uses
 /// generation stamps on `scratch` so we never `fill()` the visit array.
 ///
-/// **Where:** [`greedy_direction`], [`fill_direction`], the FFA 2-ply score in
-/// [`choose_move`], [`endgame_eval`], and the `--bench` 900-turn tiebreak.
+/// **Where:** [`greedy_direction`], [`fill_direction`], and the `--bench`
+/// 900-turn tiebreak.
 /// **Why:** “how much space is left in *my* pocket?” — used to hug walls,
 /// avoid sealing off rooms, and pick a winner if the bench hits the turn cap.
 fn flood_count(state: &State, player: usize, scratch: &mut Scratch) -> i32 {
@@ -392,8 +458,7 @@ fn flood_count(state: &State, player: usize, scratch: &mut Scratch) -> i32 {
 /// Number of empty on-board 4-neighbours of `(col, row)`.
 /// Higher degree means a more “open” cell (more future options).
 ///
-/// **Where:** [`wall_neighbor_count`] (as `4 - this`) and Voronoi `edge_sum`
-/// inside [`compute_voronoi`].
+/// **Where:** [`wall_neighbor_count`] (as `4 - this`).
 /// **Why:** leftover open edges in your territory induce wall-hugging when
 /// two Voronoi scores are close (a1k0n).
 fn empty_degree(state: &State, col: i32, row: i32) -> i32 {
@@ -597,7 +662,7 @@ fn dfs_fill_score(
 /// [`dfs_fill_score`].
 ///
 /// **Where:** [`eval_1v1`] when the duelists no longer share space;
-/// [`fill_direction`] (endgame policy); unused [`endgame_eval`].
+/// [`fill_direction`] (endgame policy).
 /// **Why:** after a cut, Voronoi is meaningless — the game is “who fills more
 /// of their own pocket.” This estimate is the leaf score for that regime.
 fn approx_fill(state: &State, player: usize, scratch: &mut Scratch) -> i32 {
@@ -636,97 +701,112 @@ struct Voronoi {
     reachable: [i32; MAX_PLAYERS],
     /// True if at least two living players can both reach some empty cell.
     still_connected: bool,
+    /// Unique Voronoi cells as row bitboards; [`battlefront`] uses two of these.
+    owned: [[u32; 20]; MAX_PLAYERS],
 }
 
-/// Multi-source Voronoi from every living head.
+/// Multi-source Voronoi from every living head, as row-bitboard distance waves.
 ///
-/// Runs one BFS per living player, then for each empty cell records the closest
-/// player. Ties are unowned (`scratch.owner = -1`) so neither side gets the
-/// territory. Also sets `still_connected` if any cell is reachable by two
-/// living players.
+/// Each wave is one orthogonal step. A cell reached by exactly one bike this
+/// wave is that bike’s territory; a cell reached by two or more is a tie and
+/// stays unowned. Reachability is a separate independent flood (opponent
+/// “owned” empty cells are still walkable). Same results as per-player BFS,
+/// but one pass over 20 `u32`s per wave instead of N × 600-cell maps.
 ///
 /// **Where:** [`eval_1v1`] and [`eval_ffa`] every leaf; [`choose_move`] as a
 /// second opinion before declaring 1v1 chambers separated.
 /// **Why:** in the open game, “land I uniquely reach first” is the standard
 /// Tron heuristic (a1k0n / GAI Challenge). Eval is dominated by this call.
-fn compute_voronoi(state: &State, scratch: &mut Scratch) -> Voronoi {
+fn compute_voronoi(state: &State) -> Voronoi {
+    let empty = empty_rows(state);
     let player_count = state.player_count as usize;
-    for player in 0..player_count {
-        if state.is_alive(player) {
-            bfs_from_player(
-                state,
-                player,
-                &mut scratch.distance[player],
-                &mut scratch.bfs_queue,
-            );
-        } else {
-            scratch.distance[player].fill(UNREACHABLE);
-        }
-    }
-    let mut territory = [0i32; MAX_PLAYERS];
-    let mut edge_sum = [0i32; MAX_PLAYERS];
+
+    let mut seeds = [[0u32; 20]; MAX_PLAYERS];
     let mut reachable = [0i32; MAX_PLAYERS];
     let mut still_connected = false;
-    scratch.owner.fill(-1);
+    let mut reached_any = [0u32; 20];
+    for player in 0..player_count {
+        if !state.is_alive(player) {
+            continue;
+        }
+        seeds[player] = head_seed(state, player, &empty);
+        let flood = flood_mask(&seeds[player], &empty);
+        reachable[player] = mask_popcount(&flood);
+        if !still_connected && masks_overlap(&flood, &reached_any) {
+            still_connected = true;
+        }
+        for row in 0..20 {
+            reached_any[row] |= flood[row];
+        }
+    }
 
-    for row in 0..HEIGHT {
-        for col in 0..WIDTH {
-            if state.occupied.is_set(col, row) {
+    let mut owned = [[0u32; 20]; MAX_PLAYERS];
+    let mut frontier = seeds;
+    let mut claimed = [0u32; 20];
+    loop {
+        let mut union = [0u32; 20];
+        let mut multi = [0u32; 20];
+        let mut any = false;
+        for player in 0..player_count {
+            if !state.is_alive(player) {
                 continue;
             }
-            let index = cell_index(col, row);
-            let mut best_dist = UNREACHABLE;
-            let mut best_player = -1i8;
-            let mut tie_count = 0;
-            for player in 0..player_count {
-                if !state.is_alive(player) {
-                    continue;
+            for row in 0..20 {
+                let cells = frontier[player][row] & !claimed[row];
+                frontier[player][row] = cells;
+                if cells != 0 {
+                    any = true;
                 }
-                let dist = scratch.distance[player][index];
-                if dist < UNREACHABLE {
-                    reachable[player] += 1;
-                }
-                if dist < best_dist {
-                    best_dist = dist;
-                    best_player = player as i8;
-                    tie_count = 1;
-                } else if dist == best_dist && dist < UNREACHABLE {
-                    tie_count += 1;
-                }
-            }
-            if best_dist == UNREACHABLE {
-                continue;
-            }
-            // Interaction test: two living players can both path to this cell.
-            let mut reacher_count = 0;
-            for player in 0..player_count {
-                if state.is_alive(player) && scratch.distance[player][index] < UNREACHABLE {
-                    reacher_count += 1;
-                }
-            }
-            if reacher_count >= 2 {
-                still_connected = true;
-            }
-            if tie_count == 1 {
-                let owner = best_player as usize;
-                territory[owner] += 1;
-                scratch.owner[index] = best_player;
-                edge_sum[owner] += empty_degree(state, col, row);
+                multi[row] |= cells & union[row];
+                union[row] |= cells;
             }
         }
+        if !any {
+            break;
+        }
+        for player in 0..player_count {
+            if !state.is_alive(player) {
+                continue;
+            }
+            for row in 0..20 {
+                owned[player][row] |= frontier[player][row] & !multi[row];
+            }
+        }
+        for row in 0..20 {
+            claimed[row] |= union[row];
+        }
+        let mut next = [[0u32; 20]; MAX_PLAYERS];
+        for player in 0..player_count {
+            if !state.is_alive(player) {
+                continue;
+            }
+            next[player] = expand_mask(&frontier[player], &empty);
+        }
+        frontier = next;
+    }
+
+    let mut territory = [0i32; MAX_PLAYERS];
+    let mut edge_sum = [0i32; MAX_PLAYERS];
+    for player in 0..player_count {
+        if !state.is_alive(player) {
+            continue;
+        }
+        territory[player] = mask_popcount(&owned[player]);
+        edge_sum[player] = mask_edge_sum(&owned[player], &empty);
     }
     Voronoi {
         territory,
         edge_sum,
         reachable,
         still_connected,
+        owned,
     }
 }
 
 /// How many of the four directions are legal for `player` (0–4).
 /// A mobility of 1 is a forced move; 0 is death next turn.
 ///
-/// **Where:** [`eval_1v1`] and [`eval_ffa`] (and unused [`endgame_eval`]).
+/// **Where:** [`eval_1v1`] and [`eval_ffa`].
 /// **Why:** getting boxed in (mobility 1→0) is often worse than losing a
 /// couple of Voronoi cells, so it is a cheap extra term in the leaf.
 fn mobility(state: &State, player: usize) -> i32 {
@@ -748,52 +828,86 @@ fn mobility(state: &State, player: usize) -> i32 {
 /// **Where:** [`choose_move`] when 3+ are alive, to pick an `opponent` for
 /// move-ordering (aim at their head). Not used for the FFA eval itself.
 /// **Why:** even in FFA we still sort moves “toward someone”; this picks who.
-fn main_opponent(state: &State, our_id: usize, scratch: &mut Scratch) -> Option<usize> {
+fn main_opponent(state: &State, our_id: usize) -> Option<usize> {
     let player_count = state.player_count as usize;
-    let mut best_player = None;
-    let mut best_dist = UNREACHABLE;
-    bfs_from_player(
-        state,
-        our_id,
-        &mut scratch.distance[our_id],
-        &mut scratch.bfs_queue,
-    );
+    let our_col = state.head_x[our_id] as i32;
+    let our_row = state.head_y[our_id] as i32;
     for player in 0..player_count {
         if player == our_id || !state.is_alive(player) {
             continue;
         }
         let head_col = state.head_x[player] as i32;
         let head_row = state.head_y[player] as i32;
-        let mut dist = UNREACHABLE;
-        for dir in 0..4 {
-            let col = head_col + DIR_X[dir];
-            let row = head_row + DIR_Y[dir];
-            if in_bounds(col, row) {
-                // Adjacent heads (our head occupies their neighbour cell).
-                if state.occupied.is_set(col, row)
-                    && col == state.head_x[our_id] as i32
-                    && row == state.head_y[our_id] as i32
-                {
-                    dist = 0;
-                } else if !state.occupied.is_set(col, row) {
-                    dist = dist.min(scratch.distance[our_id][cell_index(col, row)]);
-                }
+        if (our_col - head_col).abs() + (our_row - head_row).abs() == 1 {
+            return Some(player);
+        }
+    }
+
+    let empty = empty_rows(state);
+    let mut opp_seed = [[0u32; 20]; MAX_PLAYERS];
+    for player in 0..player_count {
+        if player != our_id && state.is_alive(player) {
+            opp_seed[player] = head_seed(state, player, &empty);
+        }
+    }
+    let mut frontier = head_seed(state, our_id, &empty);
+    let mut seen = frontier;
+    let mut dist = 1u16;
+    let mut best_player = None;
+    let mut best_dist = UNREACHABLE;
+    loop {
+        let mut any = false;
+        for row in 0..20 {
+            if frontier[row] != 0 {
+                any = true;
+                break;
             }
         }
-        if dist < best_dist {
-            best_dist = dist;
-            best_player = Some(player);
-        } else if dist == UNREACHABLE && best_dist == UNREACHABLE {
-            // Nobody shares space yet: pick the geographically nearest head.
-            let manhattan = (state.head_x[our_id] as i32 - head_col).abs()
-                + (state.head_y[our_id] as i32 - head_row).abs();
-            let previous = best_player.map(|previous_player| {
-                (state.head_x[our_id] as i32 - state.head_x[previous_player] as i32).abs()
-                    + (state.head_y[our_id] as i32 - state.head_y[previous_player] as i32).abs()
-            });
-            if best_player.is_none() || manhattan < previous.unwrap_or(i32::MAX) {
+        if !any {
+            break;
+        }
+        for player in 0..player_count {
+            if player == our_id || !state.is_alive(player) {
+                continue;
+            }
+            if dist < best_dist && masks_overlap(&frontier, &opp_seed[player]) {
+                best_dist = dist;
                 best_player = Some(player);
             }
+        }
+        if best_dist < UNREACHABLE {
+            return best_player;
+        }
+        let expanded = expand_mask(&frontier, &empty);
+        let mut next = [0u32; 20];
+        let mut grew = false;
+        for row in 0..20 {
+            next[row] = expanded[row] & !seen[row];
+            if next[row] != 0 {
+                grew = true;
+            }
+            seen[row] |= next[row];
+        }
+        if !grew {
+            break;
+        }
+        frontier = next;
+        dist += 1;
+    }
+
+    for player in 0..player_count {
+        if player == our_id || !state.is_alive(player) {
+            continue;
+        }
+        let head_col = state.head_x[player] as i32;
+        let head_row = state.head_y[player] as i32;
+        let manhattan = (our_col - head_col).abs() + (our_row - head_row).abs();
+        let previous = best_player.map(|previous_player| {
+            (our_col - state.head_x[previous_player] as i32).abs()
+                + (our_row - state.head_y[previous_player] as i32).abs()
+        });
+        if best_player.is_none() || manhattan < previous.unwrap_or(i32::MAX) {
+            best_player = Some(player);
         }
     }
     best_player
@@ -808,7 +922,7 @@ fn main_opponent(state: &State, our_id: usize, scratch: &mut Scratch) -> Option<
 /// decide open 1v1 vs chamber-fill; [`eval_1v1`] to pick Voronoi vs fill terms.
 /// **Why:** a false “we are cut off” makes minimax ignore a fight we can still
 /// reach. We would rather keep fighting than fill too early.
-fn shares_space(state: &State, our_id: usize, opponent: usize, scratch: &mut Scratch) -> bool {
+fn shares_space(state: &State, our_id: usize, opponent: usize) -> bool {
     if !state.is_alive(our_id) || !state.is_alive(opponent) {
         return false;
     }
@@ -819,59 +933,26 @@ fn shares_space(state: &State, our_id: usize, opponent: usize, scratch: &mut Scr
     if (our_col - opp_col).abs() + (our_row - opp_row).abs() == 1 {
         return true;
     }
-    // Can we path to any empty cell next to their head?
-    bfs_from_player(
-        state,
-        our_id,
-        &mut scratch.distance[our_id],
-        &mut scratch.bfs_queue,
-    );
-    for dir in 0..4 {
-        let col = opp_col + DIR_X[dir];
-        let row = opp_row + DIR_Y[dir];
-        if in_bounds(col, row)
-            && !state.occupied.is_set(col, row)
-            && scratch.distance[our_id][cell_index(col, row)] < UNREACHABLE
-        {
-            return true;
-        }
-    }
-    false
+    let empty = empty_rows(state);
+    let our_flood = flood_mask(&head_seed(state, our_id, &empty), &empty);
+    masks_overlap(&our_flood, &head_seed(state, opponent, &empty))
 }
 
 /// Count our Voronoi cells that share an edge with an opponent Voronoi cell.
 ///
-/// A larger front means more contact / contest. Requires [`compute_voronoi`]
-/// to have filled `scratch.owner`.
+/// A larger front means more contact / contest. Uses the `owned` bitboards
+/// from [`compute_voronoi`].
 ///
 /// **Where:** only the open-game branch of [`eval_1v1`].
 /// **Why:** without it, search is happy to wander into dead space while the
 /// opponent takes the middle. A small bonus keeps us on the battle line.
-fn battlefront(state: &State, our_id: usize, opponent: usize, scratch: &Scratch) -> i32 {
-    let mut front = 0;
-    for row in 0..HEIGHT {
-        for col in 0..WIDTH {
-            if state.occupied.is_set(col, row) {
-                continue;
-            }
-            let index = cell_index(col, row);
-            if scratch.owner[index] != our_id as i8 {
-                continue;
-            }
-            for dir in 0..4 {
-                let next_col = col + DIR_X[dir];
-                let next_row = row + DIR_Y[dir];
-                if in_bounds(next_col, next_row)
-                    && !state.occupied.is_set(next_col, next_row)
-                    && scratch.owner[cell_index(next_col, next_row)] == opponent as i8
-                {
-                    front += 1;
-                    break;
-                }
-            }
-        }
+fn battlefront(our_owned: &[u32; 20], opp_owned: &[u32; 20]) -> i32 {
+    let expanded = expand_mask_board(opp_owned);
+    let mut front = 0u32;
+    for row in 0..20 {
+        front += (our_owned[row] & expanded[row]).count_ones();
     }
-    front
+    front as i32
 }
 
 /// Static 1v1 evaluation from `our_id`’s point of view (positive = good for our player).
@@ -884,12 +965,13 @@ fn battlefront(state: &State, our_id: usize, opponent: usize, scratch: &Scratch)
 /// edges, raw reach, mobility, battlefront length, and a center bias that
 /// fades as the board fills.
 ///
-/// **Where:** leaves of [`negamax_1v1`]; [`oneply_direction`] when exactly one
-/// rival is alive; `--bench` `bot_voronoi1`; unused [`rollout_score`].
+/// **Where:** leaves of [`negamax_1v1`]; `--bench` `bot_voronoi1`.
 /// **Why:** this is *the* 1v1 heuristic. Search only looks a few plies; the
 /// leaf has to encode “who owns the remaining empty board.” An early version
 /// added a huge separated-bonus here and minimax hallucinated fake cuts —
-/// do not reintroduce that.
+/// do not reintroduce that. Switching to fill inside the tree is also a
+/// scale change; keep it only for positions that are already cut, not as a
+/// bonus for “looking cut.”
 fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &mut Scratch) -> i32 {
     if !state.is_alive(our_id) {
         return -MATE_SCORE + ply;
@@ -899,7 +981,7 @@ fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &m
     }
     let our_mobility = mobility(state, our_id);
     let opp_mobility = mobility(state, opponent);
-    if !shares_space(state, our_id, opponent, scratch) {
+    if !shares_space(state, our_id, opponent) {
         // Isolated chambers: the game is “who fills more of their own space”.
         let our_fill = approx_fill(state, our_id, scratch);
         let opp_fill = approx_fill(state, opponent, scratch);
@@ -915,12 +997,12 @@ fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &m
         );
         return fill_diff.signum() * 80 + fill_diff * 60 + hug * 5 + (our_mobility - opp_mobility);
     }
-    let voronoi = compute_voronoi(state, scratch);
+    let voronoi = compute_voronoi(state);
     let territory = voronoi.territory[our_id] - voronoi.territory[opponent];
     let edges = voronoi.edge_sum[our_id] - voronoi.edge_sum[opponent];
     let reach = voronoi.reachable[our_id] - voronoi.reachable[opponent];
     let mobility_diff = our_mobility - opp_mobility;
-    let front = battlefront(state, our_id, opponent, scratch);
+    let front = battlefront(&voronoi.owned[our_id], &voronoi.owned[opponent]);
     let head_col = state.head_x[our_id] as i32;
     let head_row = state.head_y[our_id] as i32;
     let center_penalty = -((head_col - 14).abs() + (head_row - 9).abs());
@@ -944,18 +1026,17 @@ fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &m
 /// and add mobility so we do not get boxed in. Death / sole survivor use mate
 /// scores like [`eval_1v1`].
 ///
-/// **Where:** leaves of [`paranoid_max`] / [`search_ffa`]; [`oneply_direction`]
-/// when 2+ rivals are alive; unused [`rollout_score`].
+/// **Where:** leaves of [`paranoid_max`].
 /// **Why:** deep 1v1 minimax in a 3–4 player game treats others as frozen walls
 /// and suicides. This leaf prefers “survive with space” over picking a fight.
-fn eval_ffa(state: &State, our_id: usize, ply: i32, scratch: &mut Scratch) -> i32 {
+fn eval_ffa(state: &State, our_id: usize, ply: i32) -> i32 {
     if !state.is_alive(our_id) {
         return -MATE_SCORE + ply;
     }
     if state.alive_mask.count_ones() == 1 {
         return MATE_SCORE - ply;
     }
-    let voronoi = compute_voronoi(state, scratch);
+    let voronoi = compute_voronoi(state);
     let mut best_other_territory = 0;
     let mut best_other_reach = 0;
     let player_count = state.player_count as usize;
@@ -978,8 +1059,8 @@ fn eval_ffa(state: &State, our_id: usize, ply: i32, scratch: &mut Scratch) -> i3
 /// once set, search returns [`TIMEOUT_SCORE`] so the caller can discard a
 /// partial iteration.
 ///
-/// **Where:** constructed in [`choose_move`] for the 1v1 iterative-deepening
-/// loop, then passed into [`negamax_1v1`]. Unused searches take one too.
+/// **Where:** constructed in [`choose_move`] for the 1v1 and FFA
+/// iterative-deepening loops, then passed into [`negamax_1v1`] / paranoid search.
 /// **Why:** CodinGame kills a late bot; we must stop on a completed depth,
 /// not mid-ply, and still undo every apply.
 struct Search {
@@ -1004,7 +1085,7 @@ impl Search {
 
     /// Count a visited node. Every 16 nodes, compare wall clock to `deadline`.
     /// Checking every node is too expensive relative to our tiny branching factor.
-    /// Called at the top of [`negamax_1v1`] (and the unused searches).
+    /// Called at the top of [`negamax_1v1`], [`paranoid_max`], and [`paranoid_min`].
     #[inline]
     fn check_time(&mut self) {
         self.nodes += 1;
@@ -1021,7 +1102,7 @@ impl Search {
 /// (usually the opponent’s head). Insertion sort is enough because `move_count ≤ 4`.
 ///
 /// **Where:** [`choose_move`] at the root (each ID iteration) and inside
-/// [`negamax_1v1`] at every interior node; unused [`search_endgame`].
+/// [`negamax_1v1`] / [`paranoid_max`] / [`paranoid_min`].
 /// **Why:** alpha-beta only cuts if we try a good move first. Branching is 2–4,
 /// so this is cheap and still pays for itself.
 fn order_moves(
@@ -1067,37 +1148,6 @@ fn order_moves(
     }
 }
 
-/// Greedy one-ply policy: try each legal step and pick the one that maximises
-/// remaining flood-fill size plus a small wall-hug bonus.
-///
-/// **Where:** [`search_ffa`] / [`play_opponents_greedy`] (what “they” would do);
-/// `--bench` `bot_greedy`; `--profile` walks 30 plies of this to reach a midgame.
-/// **Why:** a cheap space-taking model of the other FFA players, and a local
-/// `--bench` opponent.
-/// Returns `None` if `player` has no legal move.
-fn greedy_direction(state: &State, player: usize, scratch: &mut Scratch) -> Option<u8> {
-    let (legal, move_count) = state.legal_moves(player);
-    if move_count == 0 {
-        return None;
-    }
-    let mut best_dir = legal[0];
-    let mut best_score = i32::MIN;
-    for move_i in 0..move_count {
-        let dir = legal[move_i] as usize;
-        let mut after = *state;
-        after.apply(player, dir);
-        let flood = flood_count(&after, player, scratch);
-        let col = after.head_x[player] as i32;
-        let row = after.head_y[player] as i32;
-        let score = flood * 20 + wall_neighbor_count(&after, col, row) * 3;
-        if score > best_score {
-            best_score = score;
-            best_dir = legal[move_i];
-        }
-    }
-    Some(best_dir)
-}
-
 /// Negamax alpha-beta for a 1v1 duel.
 ///
 /// Score is always from `to_move`’s point of view; the caller negates. `our_id`
@@ -1133,10 +1183,14 @@ fn negamax_1v1(
         return TIMEOUT_SCORE;
     }
     let next_player = if to_move == our_id { opponent } else { our_id };
-    if !state.is_alive(our_id) {
+    // Every return is from `to_move`’s point of view so the caller can negate.
+    // Scoring terminals from `our_id` instead made a forced win come back as
+    // `-MATE` after the root negation — search then “found mate” on move 1
+    // of an empty board and stopped deepening.
+    if !state.is_alive(to_move) {
         return -MATE_SCORE + ply;
     }
-    if !state.is_alive(opponent) {
+    if !state.is_alive(next_player) {
         return MATE_SCORE - ply;
     }
 
@@ -1145,11 +1199,7 @@ fn negamax_1v1(
     if depth <= 0 {
         let move_count = state.legal_moves(to_move).1;
         if move_count == 0 {
-            return if to_move == our_id {
-                -MATE_SCORE + ply
-            } else {
-                MATE_SCORE - ply
-            };
+            return -MATE_SCORE + ply;
         }
         let score = eval_1v1(state, our_id, opponent, ply, scratch);
         return if to_move == our_id { score } else { -score };
@@ -1157,11 +1207,7 @@ fn negamax_1v1(
 
     let (mut moves, move_count) = state.legal_moves(to_move);
     if move_count == 0 {
-        if to_move == our_id {
-            return -MATE_SCORE + ply;
-        } else {
-            return MATE_SCORE - ply;
-        }
+        return -MATE_SCORE + ply;
     }
 
     let (target_col, target_row) = (
@@ -1227,173 +1273,6 @@ fn negamax_1v1(
     best_score
 }
 
-/// Leaf evaluation used only by the unused [`search_endgame`].
-/// Mix of fill estimate, flood size, wall-hug, and remaining mobility.
-/// Not on the production path: isolated chambers use the 80-step
-/// [`fill_direction`] rollout in [`choose_move`] instead.
-fn endgame_eval(state: &State, our_id: usize, scratch: &mut Scratch) -> i32 {
-    let fill = approx_fill(state, our_id, scratch);
-    let flood = flood_count(state, our_id, scratch);
-    let hug = wall_neighbor_count(
-        state,
-        state.head_x[our_id] as i32,
-        state.head_y[our_id] as i32,
-    );
-    fill * 80 + flood * 20 + hug * 6 + mobility(state, our_id)
-}
-
-/// Unused solo survival search: maximise [`endgame_eval`] at a given depth.
-///
-/// **Where:** nowhere. `#![allow(dead_code)]` keeps it for experiments.
-/// **Why it exists:** a true longest-path search in a chamber. Production
-/// [`choose_move`] uses an 80-step greedy [`fill_direction`] rollout instead,
-/// which is cheaper and scored about as well.
-fn search_endgame(
-    state: &mut State,
-    our_id: usize,
-    depth: i32,
-    ply: i32,
-    last_dir: u8,
-    search: &mut Search,
-    scratch: &mut Scratch,
-) -> i32 {
-    search.check_time();
-    if search.timed_out {
-        return TIMEOUT_SCORE;
-    }
-    let (mut moves, move_count) = state.legal_moves(our_id);
-    if move_count == 0 {
-        return ply;
-    }
-    if depth <= 0 {
-        return endgame_eval(state, our_id, scratch) + ply;
-    }
-    order_moves(
-        state,
-        our_id,
-        &mut moves,
-        move_count,
-        NO_MOVE,
-        search.killers[ply as usize % 64][0],
-        last_dir,
-        state.head_x[our_id] as i32,
-        state.head_y[our_id] as i32,
-    );
-    let mut best_score = i32::MIN / 2;
-    for move_i in 0..move_count {
-        let old_col = state.head_x[our_id];
-        let old_row = state.head_y[our_id];
-        state.apply(our_id, moves[move_i] as usize);
-        let score = search_endgame(
-            state,
-            our_id,
-            depth - 1,
-            ply + 1,
-            moves[move_i],
-            search,
-            scratch,
-        );
-        state.undo_step(our_id, old_col, old_row);
-        if search.timed_out {
-            return TIMEOUT_SCORE;
-        }
-        if score > best_score {
-            best_score = score;
-        }
-    }
-    best_score
-}
-
-/// Advance every other living player one greedy step, in seating order, until
-/// it is `our_id`’s turn again.
-///
-/// **Where:** [`search_ffa`] after each of our moves, and the FFA root loop in
-/// [`choose_move`].
-/// **Why:** sequential FFA is “we move, then everyone else moves.” Modelling
-/// them as [`greedy_direction`] is cheap enough to look several of our plies
-/// ahead. A missing legal move is death (trail cleared).
-fn play_opponents_greedy(state: &mut State, our_id: usize, scratch: &mut Scratch) {
-    let player_count = state.player_count as usize;
-    let mut player = (our_id + 1) % player_count;
-    while player != our_id {
-        if state.is_alive(player) {
-            if let Some(dir) = greedy_direction(state, player, scratch) {
-                state.apply(player, dir as usize);
-            } else {
-                state.kill(player);
-            }
-        }
-        player = (player + 1) % player_count;
-    }
-}
-
-/// Previous FFA policy: we branch, others reply with [`greedy_direction`].
-///
-/// **Where:** unused by [`choose_move`] (paranoid minimax replaced it).
-/// Kept so we can revert without rewriting.
-/// **Why it exists:** SPRT[0,10] accepted this vs 2-ply oneply (~+32 Elo 3p).
-fn search_ffa(
-    state: &State,
-    our_id: usize,
-    depth: i32,
-    ply: i32,
-    search: &mut Search,
-    scratch: &mut Scratch,
-) -> i32 {
-    search.check_time();
-    if search.timed_out {
-        return TIMEOUT_SCORE;
-    }
-    if !state.is_alive(our_id) {
-        return -MATE_SCORE + ply;
-    }
-    if state.alive_mask.count_ones() == 1 {
-        return MATE_SCORE - ply;
-    }
-    if depth <= 0 {
-        return eval_ffa(state, our_id, ply, scratch);
-    }
-    let (mut moves, move_count) = state.legal_moves(our_id);
-    if move_count == 0 {
-        return -MATE_SCORE + ply;
-    }
-    let mut target_col = state.head_x[our_id] as i32;
-    let mut target_row = state.head_y[our_id] as i32;
-    let player_count = state.player_count as usize;
-    for player in 0..player_count {
-        if player != our_id && state.is_alive(player) {
-            target_col = state.head_x[player] as i32;
-            target_row = state.head_y[player] as i32;
-            break;
-        }
-    }
-    order_moves(
-        state,
-        our_id,
-        &mut moves,
-        move_count,
-        NO_MOVE,
-        search.killers[ply as usize % 64][0],
-        NO_MOVE,
-        target_col,
-        target_row,
-    );
-    let mut best_score = -MATE_SCORE * 2;
-    for move_i in 0..move_count {
-        let mut after = *state;
-        after.apply(our_id, moves[move_i] as usize);
-        play_opponents_greedy(&mut after, our_id, scratch);
-        let score = search_ffa(&after, our_id, depth - 1, ply + 1, search, scratch);
-        if search.timed_out {
-            return TIMEOUT_SCORE;
-        }
-        if score > best_score {
-            best_score = score;
-        }
-    }
-    best_score
-}
-
 /// Next seat after `player`, wrapping in `0..player_count`.
 #[inline]
 fn next_seat(player: usize, player_count: usize) -> usize {
@@ -1428,7 +1307,7 @@ fn paranoid_max(
         return MATE_SCORE - ply;
     }
     if depth <= 0 {
-        return eval_ffa(state, our_id, ply, scratch);
+        return eval_ffa(state, our_id, ply);
     }
     let (mut moves, move_count) = state.legal_moves(our_id);
     if move_count == 0 {
@@ -1588,55 +1467,6 @@ fn paranoid_min(
     best_score
 }
 
-/// One-ply lookahead: try each of `player`’s legal moves, score the resulting
-/// position, and return the best direction.
-///
-/// With one living opponent this uses [`eval_1v1`] (and an instant mate if they
-/// have no reply). With several it uses [`eval_ffa`]. Returns `None` if dead.
-///
-/// **Where:** unused [`rollout_score`]. FFA search currently uses paranoid
-/// minimax, not this 1-ply model.
-/// **Why:** a stronger “what would they do this turn?” than raw flood-greedy;
-/// kept for experiments.
-fn oneply_direction(state: &mut State, player: usize, scratch: &mut Scratch) -> Option<u8> {
-    let (legal, move_count) = state.legal_moves(player);
-    if move_count == 0 {
-        return None;
-    }
-    if move_count == 1 {
-        return Some(legal[0]);
-    }
-    let player_count = state.player_count as usize;
-    let living_others = (0..player_count)
-        .filter(|&rival| rival != player && state.is_alive(rival))
-        .count();
-    let opponent = (0..player_count)
-        .find(|&rival| rival != player && state.is_alive(rival))
-        .unwrap_or(player);
-    let mut best_dir = legal[0];
-    let mut best_score = i32::MIN;
-    for move_i in 0..move_count {
-        let old_col = state.head_x[player];
-        let old_row = state.head_y[player];
-        state.apply(player, legal[move_i] as usize);
-        let score = if living_others <= 1 {
-            if state.is_alive(opponent) && state.legal_moves(opponent).1 == 0 {
-                MATE_SCORE
-            } else {
-                eval_1v1(state, player, opponent, 1, scratch)
-            }
-        } else {
-            eval_ffa(state, player, 1, scratch)
-        };
-        state.undo_step(player, old_col, old_row);
-        if score > best_score {
-            best_score = score;
-            best_dir = legal[move_i];
-        }
-    }
-    Some(best_dir)
-}
-
 /// Isolated-chamber policy: pick the step that keeps the most fillable space.
 ///
 /// Score = approx-fill + remaining flood + wall-hug, with a small bonus for
@@ -1687,53 +1517,6 @@ fn fill_direction(
     Some(best_dir)
 }
 
-/// Unused: play `first_dir` for us, then `steps` of [`oneply_direction`] for
-/// every living player in seating order, then return a static eval.
-///
-/// **Where:** nowhere. Production [`choose_move`] does not call this.
-/// **Why it exists:** an old “roll the position forward then eval” experiment.
-fn rollout_score(
-    state: &State,
-    our_id: usize,
-    first_dir: u8,
-    steps: i32,
-    scratch: &mut Scratch,
-) -> i32 {
-    let mut after = *state;
-    if !after.apply(our_id, first_dir as usize) {
-        return -MATE_SCORE;
-    }
-    let player_count = after.player_count as usize;
-    let mut player = (our_id + 1) % player_count;
-    let mut made = 0i32;
-    while made < steps && after.alive_mask.count_ones() > 1 && after.is_alive(our_id) {
-        if after.is_alive(player) {
-            match oneply_direction(&mut after, player, scratch) {
-                Some(dir) if after.is_legal_dir(player, dir as usize) => {
-                    after.apply(player, dir as usize);
-                }
-                _ => after.kill(player),
-            }
-            made += 1;
-        }
-        player = (player + 1) % player_count;
-    }
-    if !after.is_alive(our_id) {
-        return -MATE_SCORE + made;
-    }
-    if after.alive_mask.count_ones() == 1 {
-        return MATE_SCORE - made;
-    }
-    let others: Vec<usize> = (0..player_count)
-        .filter(|&rival| rival != our_id && after.is_alive(rival))
-        .collect();
-    if others.len() == 1 {
-        eval_1v1(&after, our_id, others[0], made, scratch)
-    } else {
-        eval_ffa(&after, our_id, made, scratch)
-    }
-}
-
 /// Choose a direction (0=UP .. 3=RIGHT) for `our_id` within `budget_ms`.
 ///
 /// Policy:
@@ -1779,23 +1562,27 @@ fn choose_move(
     let opponent = if is_duel {
         alive_others[0]
     } else {
-        main_opponent(state, our_id, scratch).unwrap_or(alive_others[0])
+        main_opponent(state, our_id).unwrap_or(alive_others[0])
     };
 
+    #[cfg(any(test, feature = "local"))]
     let occupied_count: u32 = (0..20)
         .map(|row| state.occupied.bits[row].count_ones())
         .sum();
     // Declare “cut off” only if both the BFS test and Voronoi agree we cannot
     // meet. FFA is never treated as separated (we still need to fight).
     let still_connected = !is_duel
-        || shares_space(state, our_id, opponent, scratch)
-        || compute_voronoi(state, scratch).still_connected;
+        || shares_space(state, our_id, opponent)
+        || compute_voronoi(state).still_connected;
     let separated = is_duel && !still_connected;
-    CHOOSE_MOVE_COUNT.fetch_add(1, Ordering::Relaxed);
-    if separated {
-        SEPARATED_MOVE_COUNT.fetch_add(1, Ordering::Relaxed);
-        if occupied_count < 24 {
-            EARLY_SEPARATION_COUNT.fetch_add(1, Ordering::Relaxed);
+    #[cfg(any(test, feature = "local"))]
+    {
+        CHOOSE_MOVE_COUNT.fetch_add(1, Ordering::Relaxed);
+        if separated {
+            SEPARATED_MOVE_COUNT.fetch_add(1, Ordering::Relaxed);
+            if occupied_count < 24 {
+                EARLY_SEPARATION_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1970,15 +1757,14 @@ fn choose_move(
         }
     }
 
-    if budget_ms >= TURN_BUDGET_MS {
-        // CodinGame stderr is visible in the IDE; skip it under SPRT's short budget.
-        eprintln!(
-            "{} mm {} {}ms",
-            DIR_NAME[best_dir as usize],
-            best_score,
-            start.elapsed().as_millis()
-        );
-    }
+    eprintln!(
+        "{} mm {} {}ms n={}",
+        DIR_NAME[best_dir as usize],
+        best_score,
+        start.elapsed().as_millis().max(1),
+        search.nodes,
+    );
+    let _ = std::io::stderr().flush();
     best_dir
 }
 
@@ -2117,326 +1903,16 @@ fn codingame() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Local self-play (`--bench`) so we can measure the agent before submitting.
-// ---------------------------------------------------------------------------
+#[cfg(any(test, feature = "local"))]
+mod local;
 
-/// Tiny xorshift64* RNG for local games (no `rand` crate; CodinGame is std-only).
-/// Used only by `--bench` / `--profile` spawns and the random dummy opponent.
-struct XorShift {
-    state: u64,
-}
+#[cfg(test)]
+mod voronoi_tests;
 
-impl XorShift {
-    /// Seed must be non-zero; we OR in 1 so `new(0)` still works.
-    /// [`bench`] / [`random_start`] / [`play_game`] each construct their own.
-    fn new(seed: u64) -> Self {
-        Self { state: seed | 1 }
-    }
-
-    /// Advance the xorshift64* state and return the new 64-bit value.
-    /// Seeds [`random_start`] games and picks a random legal move for `bot_random`.
-    fn next_u64(&mut self) -> u64 {
-        let mut bits = self.state;
-        bits ^= bits << 13;
-        bits ^= bits >> 7;
-        bits ^= bits << 17;
-        self.state = bits;
-        bits
-    }
-
-    /// Uniform integer in `0..modulus`. Fine for local benches, not crypto.
-    /// Spawn cells (`0..WIDTH`, `0..HEIGHT`) and random-bot move indices.
-    fn gen_range(&mut self, modulus: u32) -> u32 {
-        (self.next_u64() as u32) % modulus
-    }
-}
-
-/// Place `player_count` bikes on unique random cells (CodinGame spawn rule).
-/// `--bench` and `--profile` use this; SPRT uses the JSON opening books instead.
-fn random_start(rng: &mut XorShift, player_count: usize) -> State {
-    let mut state = State::new(player_count as u8);
-    for player in 0..player_count {
-        loop {
-            let col = rng.gen_range(WIDTH as u32) as i32;
-            let row = rng.gen_range(HEIGHT as u32) as i32;
-            if !state.occupied.is_set(col, row) {
-                state.occupy(player, col, row);
-                break;
-            }
-        }
-    }
-    state
-}
-
-/// Local-bench opponent: uniform random legal direction.
-/// Weak baseline in [`bench`]; also fills unused seats in [`play_game`]'s `[Bot; 4]`.
-fn bot_random(state: &State, player: usize, rng: &mut XorShift) -> Option<u8> {
-    let (legal, move_count) = state.legal_moves(player);
-    if move_count == 0 {
-        None
-    } else {
-        Some(legal[rng.gen_range(move_count as u32) as usize])
-    }
-}
-
-/// Local-bench opponent: [`greedy_direction`] (flood + wall-hug).
-/// One of the 1v1 matchups and a seat in the 4p mixed FFA smoke test.
-fn bot_greedy(state: &State, player: usize, scratch: &mut Scratch) -> Option<u8> {
-    greedy_direction(state, player, scratch)
-}
-
-/// Local-bench opponent: step onto the cell with the most occupied/edge neighbours.
-/// A wall-hug dummy; if we lose to this, fill / hug terms are broken.
-fn bot_wallhug(state: &State, player: usize) -> Option<u8> {
-    let (legal, move_count) = state.legal_moves(player);
-    if move_count == 0 {
-        return None;
-    }
-    let mut best_dir = legal[0];
-    let mut best_walls = -1;
-    for move_i in 0..move_count {
-        let col = state.head_x[player] as i32 + DIR_X[legal[move_i] as usize];
-        let row = state.head_y[player] as i32 + DIR_Y[legal[move_i] as usize];
-        let walls = wall_neighbor_count(state, col, row);
-        if walls > best_walls {
-            best_walls = walls;
-            best_dir = legal[move_i];
-        }
-    }
-    Some(best_dir)
-}
-
-/// Local-bench opponent: one-ply maximise of [`eval_1v1`] vs the first living rival.
-/// The usual “strong greedy” reference; a broken leaf eval historically lost to this.
-fn bot_voronoi1(state: &mut State, player: usize, scratch: &mut Scratch) -> Option<u8> {
-    let (legal, move_count) = state.legal_moves(player);
-    if move_count == 0 {
-        return None;
-    }
-    let opponent = (0..state.player_count as usize)
-        .find(|&rival| rival != player && state.is_alive(rival))
-        .unwrap_or(player);
-    let mut best_dir = legal[0];
-    let mut best_score = i32::MIN;
-    for move_i in 0..move_count {
-        let old_col = state.head_x[player];
-        let old_row = state.head_y[player];
-        state.apply(player, legal[move_i] as usize);
-        let score = eval_1v1(state, player, opponent, 1, scratch);
-        state.undo_step(player, old_col, old_row);
-        if score > best_score {
-            best_score = score;
-            best_dir = legal[move_i];
-        }
-    }
-    Some(best_dir)
-}
-
-/// Which policy occupies a seat in a local [`play_game`].
-/// Not used on CodinGame; `--bench` maps these onto dummy opponents.
-#[derive(Clone, Copy)]
-enum Bot {
-    Agent,
-    Greedy,
-    Wall,
-    Voronoi1,
-    Random,
-}
-
-/// Play one local game to completion. Returns the winning player index.
-///
-/// Players move in seating order each “turn” (a full round). Illegal / missing
-/// moves kill that player and clear their trail. Cap is 900 rounds so a fill
-/// loop cannot run forever. If several players remain, the one with the largest
-/// remaining flood wins (CodinGame would have already ended on a crash).
-///
-/// **Where:** [`bench`] only (1v1 matchups and the 4p smoke test).
-/// **Why:** a fast sanity check before SPRT. Agent search here is 25 ms/turn.
-fn play_game(mut state: State, bots: [Bot; 4], seed: u64) -> usize {
-    let mut scratch = Scratch::new();
-    let mut rng = XorShift::new(seed);
-    let mut last_dir = [NO_MOVE; MAX_PLAYERS];
-    let player_count = state.player_count as usize;
-    let mut turn = 0u32;
-    while state.alive_mask.count_ones() > 1 && turn < 900 {
-        for player in 0..player_count {
-            if !state.is_alive(player) {
-                continue;
-            }
-            if state.alive_mask.count_ones() <= 1 {
-                break;
-            }
-            let dir = match bots[player] {
-                Bot::Agent => Some(choose_move(
-                    &mut state,
-                    player,
-                    last_dir[player],
-                    25,
-                    &mut scratch,
-                )),
-                Bot::Greedy => bot_greedy(&state, player, &mut scratch),
-                Bot::Wall => bot_wallhug(&state, player),
-                Bot::Voronoi1 => bot_voronoi1(&mut state, player, &mut scratch),
-                Bot::Random => bot_random(&state, player, &mut rng),
-            };
-            match dir {
-                Some(chosen) if state.is_legal_dir(player, chosen as usize) => {
-                    state.apply(player, chosen as usize);
-                    last_dir[player] = chosen;
-                }
-                _ => state.kill(player),
-            }
-        }
-        turn += 1;
-    }
-    let living: Vec<usize> = (0..player_count)
-        .filter(|&player| state.is_alive(player))
-        .collect();
-    if living.len() == 1 {
-        return living[0];
-    }
-    if living.is_empty() {
-        return 0;
-    }
-    // Simultaneous last-crash / turn-cap: largest remaining chamber wins.
-    let mut best_player = living[0];
-    let mut best_flood = -1;
-    for &player in &living {
-        let flood = flood_count(&state, player, &mut scratch);
-        if flood > best_flood {
-            best_flood = flood;
-            best_player = player;
-        }
-    }
-    best_player
-}
-
-/// `cargo run --release -- --bench`: 12 games vs each dummy, plus 8 FFA games.
-/// Prints win rates and how often 1v1 search thought the chambers were split.
-///
-/// **Where:** [`main`] when argv contains `--bench`. Not the SPRT harness
-/// (`tools/sprt.sh` plays two compiled binaries instead).
-fn bench() {
-    let mut rng = XorShift::new(0xC0FFEE);
-    let matchups: [(&str, Bot); 4] = [
-        ("random", Bot::Random),
-        ("wall-hug", Bot::Wall),
-        ("greedy-fill", Bot::Greedy),
-        ("voronoi-1ply", Bot::Voronoi1),
-    ];
-    let games = 12;
-    eprintln!("Self-play: {games} games per matchup, 2 players, 30x20, 25ms/turn");
-    for (name, opponent_bot) in matchups {
-        let mut wins_as_first = 0;
-        let mut first_games = 0;
-        let mut agent_wins = 0;
-        for game_i in 0..games {
-            let seed = rng.next_u64();
-            let start_state = random_start(&mut XorShift::new(seed), 2);
-            // Alternate colours so first-mover bias does not dominate the score.
-            let (bot0, bot1) = if game_i % 2 == 0 {
-                (Bot::Agent, opponent_bot)
-            } else {
-                (opponent_bot, Bot::Agent)
-            };
-            let mut bots = [Bot::Random; 4];
-            bots[0] = bot0;
-            bots[1] = bot1;
-            let winner = play_game(start_state, bots, seed ^ 0x9E3779B97F4A7C15);
-            let agent_id = if game_i % 2 == 0 { 0 } else { 1 };
-            if game_i % 2 == 0 {
-                first_games += 1;
-                if winner == 0 {
-                    wins_as_first += 1;
-                }
-            }
-            if winner == agent_id {
-                agent_wins += 1;
-            }
-        }
-        eprintln!(
-            "  vs {name:12}  agent {agent_wins:3}/{games}  ({:.0}%)  as-p0 {wins_as_first}/{first_games}",
-            100.0 * agent_wins as f64 / games as f64
-        );
-    }
-    let separated = SEPARATED_MOVE_COUNT.load(Ordering::Relaxed);
-    let total = CHOOSE_MOVE_COUNT.load(Ordering::Relaxed);
-    let early = EARLY_SEPARATION_COUNT.load(Ordering::Relaxed);
-    eprintln!(
-        "  separated moves {separated}/{total} ({:.0}%) early {early}",
-        if total > 0 {
-            100.0 * separated as f64 / total as f64
-        } else {
-            0.0
-        }
-    );
-
-    let mut ffa_wins = 0;
-    let ffa_games = 8;
-    // Four-player smoke test: us vs three different dummies.
-    for _game_i in 0..ffa_games {
-        let seed = rng.next_u64();
-        let start_state = random_start(&mut XorShift::new(seed), 4);
-        let bots = [Bot::Agent, Bot::Greedy, Bot::Wall, Bot::Voronoi1];
-        let winner = play_game(start_state, bots, seed);
-        if winner == 0 {
-            ffa_wins += 1;
-        }
-    }
-    eprintln!(
-        "  FFA vs mixed     agent {ffa_wins:3}/{ffa_games}  ({:.0}%)",
-        100.0 * ffa_wins as f64 / ffa_games as f64
-    );
-}
-
-/// `cargo run --release -- --profile`: eval throughput plus one timed `choose_move`.
-/// Walks 30 greedy plies first so we profile a midgame position, not an empty board.
-///
-/// **Where:** [`main`] when argv contains `--profile`. Use this to see whether
-/// an eval change helped nodes/sec (Voronoi is the usual bottleneck).
-fn profile() {
-    let mut rng = XorShift::new(42);
-    let mut state = random_start(&mut rng, 2);
-    let mut scratch = Scratch::new();
-    // Advance into a typical midgame so eval/search times are realistic.
-    for _ in 0..30 {
-        for player in 0..2 {
-            if let Some(dir) = bot_greedy(&state, player, &mut scratch) {
-                state.apply(player, dir as usize);
-            }
-        }
-    }
-    let eval_started = Instant::now();
-    let eval_count = 2000;
-    let mut checksum = 0i32;
-    for _ in 0..eval_count {
-        checksum ^= eval_1v1(&state, 0, 1, 0, &mut scratch);
-    }
-    let eval_time = eval_started.elapsed();
-    eprintln!(
-        "eval: {} in {:?} ({:.1}/ms) checksum {checksum}",
-        eval_count,
-        eval_time,
-        eval_count as f64 / eval_time.as_secs_f64() / 1000.0
-    );
-    let choose_started = Instant::now();
-    let dir = choose_move(&mut state, 0, NO_MOVE, TURN_BUDGET_MS, &mut scratch);
-    eprintln!(
-        "choose_move {} in {:?}",
-        DIR_NAME[dir as usize],
-        choose_started.elapsed()
-    );
-}
-
-/// `--bench` / `--profile` for local work; otherwise the CodinGame I/O loop.
-/// The judge (and SPRT) launch the binary with no flags, so [`codingame`] runs.
 fn main() {
-    if std::env::args().any(|arg| arg == "--bench") {
-        bench();
-    } else if std::env::args().any(|arg| arg == "--profile") {
-        profile();
-    } else {
-        codingame();
+    #[cfg(feature = "local")]
+    if local::run() {
+        return;
     }
+    codingame();
 }
