@@ -6,8 +6,8 @@
 //! **1v1:** iterative-deepening alpha-beta with a Voronoi territory eval.
 //! When the two bikes can no longer reach each other, switch to greedy
 //! space-fill (survive as long as possible in our chamber).
-//! **FFA (3–4 players):** one 2-ply of greedy replies, no deep minimax
-//! (deep 1v1 search suicides against multiple opponents).
+//! **FFA (3–4 players):** iterative-deepening [`search_ffa`] — we branch, others
+//! reply with greedy fill. Deep 1v1 minimax is not used (it suicides into fights).
 
 #![allow(dead_code)]
 
@@ -943,8 +943,8 @@ fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &m
 /// and add mobility so we do not get boxed in. Death / sole survivor use mate
 /// scores like [`eval_1v1`].
 ///
-/// **Where:** the 2-ply FFA branch of [`choose_move`]; [`oneply_direction`]
-/// when 2+ rivals are alive; unused [`search_ffa`] / [`rollout_score`].
+/// **Where:** the FFA leaves of [`search_ffa`] / [`choose_move`]; [`oneply_direction`]
+/// when 2+ rivals are alive; unused [`rollout_score`].
 /// **Why:** deep 1v1 minimax in a 3–4 player game treats others as frozen walls
 /// and suicides. This leaf prefers “survive with space” over picking a fight.
 fn eval_ffa(state: &State, our_id: usize, ply: i32, scratch: &mut Scratch) -> i32 {
@@ -1069,10 +1069,10 @@ fn order_moves(
 /// Greedy one-ply policy: try each legal step and pick the one that maximises
 /// remaining flood-fill size plus a small wall-hug bonus.
 ///
-/// **Where:** unused [`search_ffa`] (what “they” would do); `--bench`
-/// `bot_greedy`; `--profile` walks 30 plies of this to reach a midgame.
-/// **Why:** a cheap space-taking model. Production FFA uses the stronger
-/// [`oneply_direction`] for opponent replies instead.
+/// **Where:** [`search_ffa`] / [`play_opponents_greedy`] (what “they” would do);
+/// `--bench` `bot_greedy`; `--profile` walks 30 plies of this to reach a midgame.
+/// **Why:** a cheap space-taking model of the other FFA players, and a local
+/// `--bench` opponent.
 /// Returns `None` if `player` has no legal move.
 fn greedy_direction(state: &State, player: usize, scratch: &mut Scratch) -> Option<u8> {
     let (legal, move_count) = state.legal_moves(player);
@@ -1303,14 +1303,38 @@ fn search_endgame(
     best_score
 }
 
-/// Unused FFA search: we branch on our moves; every other player replies with
+/// Advance every other living player one greedy step, in seating order, until
+/// it is `our_id`’s turn again.
+///
+/// **Where:** [`search_ffa`] after each of our moves, and the FFA root loop in
+/// [`choose_move`].
+/// **Why:** sequential FFA is “we move, then everyone else moves.” Modelling
+/// them as [`greedy_direction`] is cheap enough to look several of our plies
+/// ahead. A missing legal move is death (trail cleared).
+fn play_opponents_greedy(state: &mut State, our_id: usize, scratch: &mut Scratch) {
+    let player_count = state.player_count as usize;
+    let mut player = (our_id + 1) % player_count;
+    while player != our_id {
+        if state.is_alive(player) {
+            if let Some(dir) = greedy_direction(state, player, scratch) {
+                state.apply(player, dir as usize);
+            } else {
+                state.kill(player);
+            }
+        }
+        player = (player + 1) % player_count;
+    }
+}
+
+/// FFA search: we branch on our moves; every other player replies with
 /// [`greedy_direction`] (or dies if they have no move).
 ///
-/// **Where:** nowhere today. [`choose_move`] sets FFA `max_depth = 0` and uses
-/// a 2-ply of [`oneply_direction`] + [`eval_ffa`] instead.
-/// **Why it exists:** a deeper FFA tree to try later. Deep 1v1 minimax in FFA
-/// suicides because it assumes others play “our” duel; this models them as
-/// greedy fillers. Wiring it in is a listed next experiment.
+/// **Where:** iterative deepening in [`choose_move`] when 3+ bikes are alive.
+/// The root loop applies our move and [`play_opponents_greedy`], then calls
+/// this with the remaining depth.
+/// **Why:** deep 1v1 minimax in FFA treats extra bikes as frozen walls and
+/// suicides. This keeps a “they fill space greedily” model so we can look
+/// several of *our* plies ahead without a 4-player Max-N tree.
 fn search_ffa(
     state: &State,
     our_id: usize,
@@ -1332,28 +1356,36 @@ fn search_ffa(
     if depth <= 0 {
         return eval_ffa(state, our_id, ply, scratch);
     }
-    let (moves, move_count) = state.legal_moves(our_id);
+    let (mut moves, move_count) = state.legal_moves(our_id);
     if move_count == 0 {
         return -MATE_SCORE + ply;
     }
+    let mut target_col = state.head_x[our_id] as i32;
+    let mut target_row = state.head_y[our_id] as i32;
+    let player_count = state.player_count as usize;
+    for player in 0..player_count {
+        if player != our_id && state.is_alive(player) {
+            target_col = state.head_x[player] as i32;
+            target_row = state.head_y[player] as i32;
+            break;
+        }
+    }
+    order_moves(
+        state,
+        our_id,
+        &mut moves,
+        move_count,
+        NO_MOVE,
+        search.killers[ply as usize % 64][0],
+        NO_MOVE,
+        target_col,
+        target_row,
+    );
     let mut best_score = -MATE_SCORE * 2;
     for move_i in 0..move_count {
         let mut after = *state;
         after.apply(our_id, moves[move_i] as usize);
-        // Copy the state so opponent deaths do not need undo; we just drop `after`.
-        let player_count = after.player_count as usize;
-        // Walk the remaining seats in seating order until we get back to us.
-        let mut player = (our_id + 1) % player_count;
-        while player != our_id {
-            if after.is_alive(player) {
-                if let Some(dir) = greedy_direction(&after, player, scratch) {
-                    after.apply(player, dir as usize);
-                } else {
-                    after.kill(player);
-                }
-            }
-            player = (player + 1) % player_count;
-        }
+        play_opponents_greedy(&mut after, our_id, scratch);
         let score = search_ffa(&after, our_id, depth - 1, ply + 1, search, scratch);
         if search.timed_out {
             return TIMEOUT_SCORE;
@@ -1371,10 +1403,10 @@ fn search_ffa(
 /// With one living opponent this uses [`eval_1v1`] (and an instant mate if they
 /// have no reply). With several it uses [`eval_ffa`]. Returns `None` if dead.
 ///
-/// **Where:** FFA [`choose_move`] — after we try a root move, every other
-/// living player replies with this; unused [`rollout_score`].
-/// **Why:** we need a “what would they do this turn?” model that is stronger
-/// than raw flood-greedy but cheap enough to run N−1 times per root move.
+/// **Where:** unused [`rollout_score`]. Production FFA uses [`search_ffa`]
+/// (greedy replies) instead of this as the opponent model.
+/// **Why:** a stronger “what would they do this turn?” than raw flood-greedy;
+/// kept for experiments.
 fn oneply_direction(state: &mut State, player: usize, scratch: &mut Scratch) -> Option<u8> {
     let (legal, move_count) = state.legal_moves(player);
     if move_count == 0 {
@@ -1518,8 +1550,9 @@ fn rollout_score(
 /// - One legal move → play it immediately.
 /// - Nobody else alive → isolated [`fill_direction`].
 /// - 1v1 and the two chambers are cut off → 80-step greedy fill rollout.
-/// - 3+ living players → 2-ply: we move, others reply with [`oneply_direction`],
-///   then [`eval_ffa`]. Iterative deepening is skipped (`max_depth = 0`).
+/// - 3+ living players → iterative-deepening [`search_ffa`] (we branch, others
+///   play [`greedy_direction`]). No 2-ply oneply warmup; ID starts from the
+///   first ordered move so search gets the full remaining budget.
 /// - 1v1 still connected → iterative-deepening [`negamax_1v1`] up to depth 16
 ///   or the time budget. There is no 2-ply Voronoi warmup; ID starts from the
 ///   first ordered move so search gets the full remaining budget.
@@ -1616,108 +1649,129 @@ fn choose_move(
         return best_dir;
     }
 
-    // FFA has no deep search (`max_depth = 0` below), so it still uses 2-ply
-    // greedy. 1v1 skips that warmup so iterative deepening gets the full budget.
+    // Open 1v1 and FFA both skip a 2-ply warmup so iterative deepening gets
+    // the full remaining budget. Seed is the first ordered legal move.
     let mut best_dir = moves[0];
     let mut best_score = 0i32;
-    if !is_duel {
-        best_score = i32::MIN;
-        for move_i in 0..move_count {
-            let old_col = state.head_x[our_id];
-            let old_row = state.head_y[our_id];
-            state.apply(our_id, moves[move_i] as usize);
-            let mut after = *state;
-            let player_count = after.player_count as usize;
-            let mut player = (our_id + 1) % player_count;
-            while player != our_id {
-                if after.is_alive(player) {
-                    if let Some(dir) = oneply_direction(&mut after, player, scratch) {
-                        after.apply(player, dir as usize);
-                    } else {
-                        after.kill(player);
-                    }
-                }
-                player = (player + 1) % player_count;
-            }
-            let mut score =
-                eval_ffa(&after, our_id, 1, scratch) + flood_count(&after, our_id, scratch) * 20;
-            state.undo_step(our_id, old_col, old_row);
-            if moves[move_i] == last_dir {
-                score += 4;
-            }
-            if score > best_score {
-                best_score = score;
-                best_dir = moves[move_i];
-            }
-        }
-    }
 
     let remaining = Duration::from_millis(budget_ms.max(1)).saturating_sub(start.elapsed());
     let mut search = Search::new(remaining);
     let mut principal_dir = best_dir;
-    // FFA: skip iterative deepening. 1v1: search as deep as time allows (cap 16).
-    let max_depth = if state.alive_mask.count_ones() > 2 {
-        0
-    } else {
-        16
-    };
-    for depth in 1..=max_depth {
-        if Instant::now() >= search.deadline {
-            break;
-        }
-        let mut iter_best_dir = principal_dir;
-        let mut iter_best_score = -MATE_SCORE * 2;
-        let mut completed_iteration = true;
-        // Re-order using last iteration’s PV and root killers.
-        order_moves(
-            state,
-            our_id,
-            &mut moves,
-            move_count,
-            principal_dir,
-            search.killers[0][0],
-            last_dir,
-            target_col,
-            target_row,
-        );
-        for move_i in 0..move_count {
-            let old_col = state.head_x[our_id];
-            let old_row = state.head_y[our_id];
-            state.apply(our_id, moves[move_i] as usize);
-            let score = -negamax_1v1(
+
+    if !is_duel {
+        // FFA: each ID ply is “our move, then greedy replies, then search_ffa”.
+        let max_ffa_depth = 8;
+        for depth in 1..=max_ffa_depth {
+            if Instant::now() >= search.deadline {
+                break;
+            }
+            let mut iter_best_dir = principal_dir;
+            let mut iter_best_score = -MATE_SCORE * 2;
+            let mut completed_iteration = true;
+            order_moves(
                 state,
                 our_id,
-                opponent,
-                opponent,
-                depth - 1,
-                1,
-                -MATE_SCORE * 2,
-                -iter_best_score,
-                moves[move_i],
-                NO_MOVE,
-                &mut search,
-                scratch,
+                &mut moves,
+                move_count,
+                principal_dir,
+                search.killers[0][0],
+                last_dir,
+                target_col,
+                target_row,
             );
-            state.undo_step(our_id, old_col, old_row);
-            if search.timed_out {
-                completed_iteration = false;
-                break;
+            for move_i in 0..move_count {
+                let mut after = *state;
+                after.apply(our_id, moves[move_i] as usize);
+                play_opponents_greedy(&mut after, our_id, scratch);
+                let score = if !after.is_alive(our_id) {
+                    -MATE_SCORE + 1
+                } else if after.alive_mask.count_ones() == 1 {
+                    MATE_SCORE - 1
+                } else {
+                    search_ffa(&after, our_id, depth - 1, 1, &mut search, scratch)
+                };
+                if search.timed_out {
+                    completed_iteration = false;
+                    break;
+                }
+                if score > iter_best_score {
+                    iter_best_score = score;
+                    iter_best_dir = moves[move_i];
+                }
             }
-            if score > iter_best_score {
-                iter_best_score = score;
-                iter_best_dir = moves[move_i];
+            if completed_iteration {
+                principal_dir = iter_best_dir;
+                best_dir = iter_best_dir;
+                best_score = iter_best_score;
+                if iter_best_score.abs() >= MATE_SCORE - 200 {
+                    break;
+                }
+            } else {
+                break;
             }
         }
-        if completed_iteration {
-            principal_dir = iter_best_dir;
-            best_dir = iter_best_dir;
-            // Forced mate / loss: no point searching deeper.
-            if iter_best_score.abs() >= MATE_SCORE - 200 {
+    } else {
+        // 1v1: search as deep as time allows (cap 16).
+        let max_depth = 16;
+        for depth in 1..=max_depth {
+            if Instant::now() >= search.deadline {
                 break;
             }
-        } else {
-            // Timed out mid-iteration: keep the previous completed PV.
-            break;
+            let mut iter_best_dir = principal_dir;
+            let mut iter_best_score = -MATE_SCORE * 2;
+            let mut completed_iteration = true;
+            // Re-order using last iteration’s PV and root killers.
+            order_moves(
+                state,
+                our_id,
+                &mut moves,
+                move_count,
+                principal_dir,
+                search.killers[0][0],
+                last_dir,
+                target_col,
+                target_row,
+            );
+            for move_i in 0..move_count {
+                let old_col = state.head_x[our_id];
+                let old_row = state.head_y[our_id];
+                state.apply(our_id, moves[move_i] as usize);
+                let score = -negamax_1v1(
+                    state,
+                    our_id,
+                    opponent,
+                    opponent,
+                    depth - 1,
+                    1,
+                    -MATE_SCORE * 2,
+                    -iter_best_score,
+                    moves[move_i],
+                    NO_MOVE,
+                    &mut search,
+                    scratch,
+                );
+                state.undo_step(our_id, old_col, old_row);
+                if search.timed_out {
+                    completed_iteration = false;
+                    break;
+                }
+                if score > iter_best_score {
+                    iter_best_score = score;
+                    iter_best_dir = moves[move_i];
+                }
+            }
+            if completed_iteration {
+                principal_dir = iter_best_dir;
+                best_dir = iter_best_dir;
+                best_score = iter_best_score;
+                // Forced mate / loss: no point searching deeper.
+                if iter_best_score.abs() >= MATE_SCORE - 200 {
+                    break;
+                }
+            } else {
+                // Timed out mid-iteration: keep the previous completed PV.
+                break;
+            }
         }
     }
 
