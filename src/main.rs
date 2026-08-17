@@ -44,9 +44,20 @@ const UNREACHABLE: u16 = 0x7FFF;
 const MATE_SCORE: i32 = 1_000_000;
 /// Returned from search when the time budget is exhausted (not a real eval).
 const TIMEOUT_SCORE: i32 = i32::MIN / 4;
+/// Extra plies a tactical 1v1 leaf may search (adjacent heads, one escape,
+/// or a cut that appears this ply). Caps the horizon so a close fight cannot
+/// run away with the 75 ms budget.
+const QS_MAX: i32 = 4;
+/// Half-window around the previous 1v1 ID score (eval units). ~320 Voronoi
+/// cells: open-game depths should rarely fail. Mate and a sudden open→cut
+/// still fail and re-search full-window.
+const ASPIRATION_DELTA: i32 = 16_000;
 
 /// Bits 0..29 are on the 30-wide board; 30 and 31 stay unused.
 const COL_MASK: u32 = (1 << 30) - 1;
+/// Even columns (0, 2, …, 28). With an even row this is `(col + row)` even;
+/// with an odd row it is `(col + row)` odd. Used by the checkerboard fill bound.
+const EVEN_COLS: u32 = 0x1555_5555;
 
 const TURN_BUDGET_MS: u64 = 75;
 const FIRST_TURN_BUDGET_MS: u64 = 85;
@@ -374,6 +385,60 @@ fn mask_popcount(mask: &[u32; 20]) -> i32 {
     mask.iter().map(|row| row.count_ones()).sum::<u32>() as i32
 }
 
+/// Longest path through a bipartite set that starts on `start_parity`.
+///
+/// Same-colour surplus is unfillable: after the minority colour runs out you
+/// cannot step onto the leftover majority cells. `start_parity` is 0 for even
+/// `(col + row)`, 1 for odd — the colour of the first empty cell of the path.
+///
+/// **Where:** [`dfs_fill_score`] (per chamber) and [`checkerboard_reach_bound`].
+/// **Why:** raw flood / uncut DFS count cells you cannot snake through.
+#[inline]
+fn checkerboard_path_bound(start_parity: i32, even: i32, odd: i32) -> i32 {
+    let (same, other) = if start_parity == 0 {
+        (even, odd)
+    } else {
+        (odd, even)
+    };
+    same.min(other) * 2 + i32::from(same > other)
+}
+
+/// Even / odd `(col + row)` popcounts of a 20-row occupancy mask.
+fn mask_parity_counts(mask: &[u32; 20]) -> (i32, i32) {
+    let mut even = 0i32;
+    let mut odd = 0i32;
+    for row in 0..20 {
+        let bits = mask[row];
+        let even_on_row = if row % 2 == 0 {
+            EVEN_COLS
+        } else {
+            !EVEN_COLS & COL_MASK
+        };
+        even += (bits & even_on_row).count_ones() as i32;
+        odd += (bits & !even_on_row & COL_MASK).count_ones() as i32;
+    }
+    (even, odd)
+}
+
+/// Checkerboard upper bound on filling every empty cell `player` can reach.
+///
+/// The first step from the occupied head always lands on the opposite colour,
+/// so the path starts on `(head_col + head_row + 1) & 1`.
+///
+/// **Where:** [`fill_direction`] (remaining-space term) and tests.
+/// **Why:** a flood count of 9 in a 5–4 colour pocket is not 9 extra lives.
+fn checkerboard_reach_bound(state: &State, player: usize) -> i32 {
+    if !state.is_alive(player) {
+        return 0;
+    }
+    let empty = empty_rows(state);
+    let reach = flood_mask(&head_seed(state, player, &empty), &empty);
+    let (even, odd) = mask_parity_counts(&reach);
+    let start_parity =
+        (state.head_x[player] as i32 + state.head_y[player] as i32 + 1) & 1;
+    checkerboard_path_bound(start_parity, even, odd)
+}
+
 fn masks_overlap(left: &[u32; 20], right: &[u32; 20]) -> bool {
     for row in 0..20 {
         if left[row] & right[row] != 0 {
@@ -529,8 +594,6 @@ fn is_local_cut(state: &State, col: i32, row: i32) -> bool {
     }
 
     // Map each 4-neighbour onto a ring slot: UP=1, RIGHT=3, DOWN=5, LEFT=7.
-    /// Which of the 8 ring indices corresponds to this orthogonal neighbour.
-    /// Local to [`is_local_cut`]: UP=1, RIGHT=3, DOWN=5, LEFT=7 on the clockwise ring.
     fn neighbor_to_ring(col: i32, row: i32, neighbor_col: i32, neighbor_row: i32) -> usize {
         if neighbor_col == col && neighbor_row == row - 1 {
             1
@@ -569,7 +632,10 @@ fn is_local_cut(state: &State, col: i32, row: i32) -> bool {
             let neighbor_slot = ((slot as i32 + delta + 8) % 8) as usize;
             // Only walk 4-adjacent ring cells (skip diagonal-only pairs).
             let (a_col, a_row) = (col + RING[slot].0, row + RING[slot].1);
-            let (b_col, b_row) = (col + RING[neighbor_slot].0, row + RING[neighbor_slot].1);
+            let (b_col, b_row) = (
+                col + RING[neighbor_slot].0,
+                row + RING[neighbor_slot].1,
+            );
             if (a_col - b_col).abs() + (a_row - b_row).abs() != 1 {
                 continue;
             }
@@ -592,25 +658,44 @@ fn is_local_cut(state: &State, col: i32, row: i32) -> bool {
     false
 }
 
+/// Fill estimate plus the even/odd cell counts of the chosen subtree.
+/// `est` is already capped by [`checkerboard_path_bound`] for a path that
+/// starts by occupying this subtree’s root cell.
+struct FillScore {
+    est: i32,
+    even: i32,
+    odd: i32,
+}
+
+#[inline]
+fn cap_fill(col: i32, row: i32, est: i32, even: i32, odd: i32) -> i32 {
+    est.min(checkerboard_path_bound((col + row) & 1, even, odd))
+}
+
 /// Estimate how many empty cells a perfect space-fill from `(col, row)` can take.
 ///
 /// Recurses through unvisited empty 4-neighbours. At a local cut we can only
 /// commit to one pocket, so we take the max; otherwise we sum (the region is
 /// still one connected “snake” we can traverse). Returns at least 1 for the
 /// current cell. `generation` is the visit stamp from [`approx_fill`].
+/// The estimate is then min’d with the checkerboard bound on the chosen cells:
+/// a simply-connected 5–4 colour blob is 8 lives, not 9.
 ///
 /// **Where:** only [`approx_fill`] (once per empty neighbour of the head).
 /// **Why:** when 1v1 is cut off, remaining *life* is fillable cells, not raw
-/// flood size. This is a cheap stand-in for a chamber tree.
+/// flood size. Local cuts plus bipartite surplus are a cheap stand-in for a
+/// chamber tree.
 fn dfs_fill_score(
     state: &State,
     col: i32,
     row: i32,
     scratch: &mut Scratch,
     generation: u32,
-) -> i32 {
+) -> FillScore {
     let index = cell_index(col, row);
     scratch.visited_stamp[index] = generation;
+    let mut even = i32::from((col + row) & 1 == 0);
+    let mut odd = 1 - even;
     let mut next_cells = [(0i32, 0i32); 4];
     let mut next_count = 0;
     for dir in 0..4 {
@@ -625,41 +710,75 @@ fn dfs_fill_score(
         }
     }
     if next_count == 0 {
-        return 1;
+        return FillScore {
+            est: 1,
+            even,
+            odd,
+        };
     }
     // A single exit: we must take it, no branching choice.
     if next_count == 1 {
-        return 1 + dfs_fill_score(state, next_cells[0].0, next_cells[0].1, scratch, generation);
+        let child = dfs_fill_score(
+            state,
+            next_cells[0].0,
+            next_cells[0].1,
+            scratch,
+            generation,
+        );
+        even += child.even;
+        odd += child.odd;
+        return FillScore {
+            est: cap_fill(col, row, 1 + child.est, even, odd),
+            even,
+            odd,
+        };
     }
     // A cut means walking here walls off some neighbours from each other.
     if is_local_cut(state, col, row) {
-        let mut best_pocket = 0;
+        let mut best_est = 0;
+        let mut best_even = 0;
+        let mut best_odd = 0;
         for pocket_i in 0..next_count {
             let (pocket_col, pocket_row) = next_cells[pocket_i];
             if scratch.visited_stamp[cell_index(pocket_col, pocket_row)] != generation {
                 let pocket = dfs_fill_score(state, pocket_col, pocket_row, scratch, generation);
-                if pocket > best_pocket {
-                    best_pocket = pocket;
+                if pocket.est > best_est {
+                    best_est = pocket.est;
+                    best_even = pocket.even;
+                    best_odd = pocket.odd;
                 }
             }
         }
-        1 + best_pocket
+        even += best_even;
+        odd += best_odd;
+        FillScore {
+            est: cap_fill(col, row, 1 + best_est, even, odd),
+            even,
+            odd,
+        }
     } else {
         let mut total = 1;
         for next_i in 0..next_count {
             let (next_col, next_row) = next_cells[next_i];
             if scratch.visited_stamp[cell_index(next_col, next_row)] != generation {
-                total += dfs_fill_score(state, next_col, next_row, scratch, generation);
+                let child = dfs_fill_score(state, next_col, next_row, scratch, generation);
+                even += child.even;
+                odd += child.odd;
+                total += child.est;
             }
         }
-        total
+        FillScore {
+            est: cap_fill(col, row, total, even, odd),
+            even,
+            odd,
+        }
     }
 }
 
 /// How many cells `player` can still claim if they fill their chamber greedily.
 ///
 /// Tries each empty neighbour of the head and returns the best
-/// [`dfs_fill_score`].
+/// [`dfs_fill_score`] (already checkerboard-capped per chamber).
 ///
 /// **Where:** [`eval_1v1`] when the duelists no longer share space;
 /// [`fill_direction`] (endgame policy).
@@ -680,7 +799,7 @@ fn approx_fill(state: &State, player: usize, scratch: &mut Scratch) -> i32 {
             && !state.occupied.is_set(col, row)
             && scratch.visited_stamp[cell_index(col, row)] != generation
         {
-            let score = dfs_fill_score(state, col, row, scratch, generation);
+            let score = dfs_fill_score(state, col, row, scratch, generation).est;
             if score > best {
                 best = score;
             }
@@ -955,6 +1074,67 @@ fn battlefront(our_owned: &[u32; 20], opp_owned: &[u32; 20]) -> i32 {
     front as i32
 }
 
+/// Manhattan distance between two living heads.
+#[inline]
+fn heads_manhattan(state: &State, a: usize, b: usize) -> i32 {
+    (state.head_x[a] as i32 - state.head_x[b] as i32).abs()
+        + (state.head_y[a] as i32 - state.head_y[b] as i32).abs()
+}
+
+/// True if `to_move` has a legal step that splits the two bikes.
+///
+/// **Where:** [`wants_quiescence`] when heads are close (`manh <= 3`) and
+/// someone is already down to two escapes. Not used on quiet opening leaves.
+fn one_ply_creates_cut(
+    state: &mut State,
+    our_id: usize,
+    opponent: usize,
+    to_move: usize,
+) -> bool {
+    if !shares_space(state, our_id, opponent) {
+        return false;
+    }
+    let (moves, move_count) = state.legal_moves(to_move);
+    for i in 0..move_count {
+        let old_col = state.head_x[to_move];
+        let old_row = state.head_y[to_move];
+        state.apply(to_move, moves[i] as usize);
+        let cut = !shares_space(state, our_id, opponent);
+        state.undo_step(to_move, old_col, old_row);
+        if cut {
+            return true;
+        }
+    }
+    false
+}
+
+/// Horizon extension: heads are adjacent / almost adjacent, a bike has one
+/// escape, or a cut appears in one ply.
+fn wants_quiescence(
+    state: &mut State,
+    our_id: usize,
+    opponent: usize,
+    qs_left: i32,
+    to_move: usize,
+) -> bool {
+    if qs_left <= 0 || !state.is_alive(our_id) || !state.is_alive(opponent) {
+        return false;
+    }
+    let manh = heads_manhattan(state, our_id, opponent);
+    if manh <= 2 {
+        return true;
+    }
+    if mobility(state, our_id) <= 1 || mobility(state, opponent) <= 1 {
+        return true;
+    }
+    // One-ply cut: skip while both still have room (opening leaves are manh 3
+    // on an empty board; a full BFS there is wasted). Once someone is down to
+    // two escapes, a corridor pinch this ply is worth checking.
+    (mobility(state, our_id) <= 2 || mobility(state, opponent) <= 2)
+        && manh <= 3
+        && one_ply_creates_cut(state, our_id, opponent, to_move)
+}
+
 /// Static 1v1 evaluation from `our_id`’s point of view (positive = good for our player).
 ///
 /// Terminal: we are dead → `-MATE_SCORE + ply`; they are dead → `MATE_SCORE - ply`
@@ -1155,26 +1335,29 @@ fn order_moves(
 /// is written from `our_id`’s side, then flipped if the opponent is to move.
 ///
 /// `depth` is remaining plies to a leaf. `ply` is distance from the root
-/// (used to prefer faster mates). `last_dir_*` help move ordering (prefer
-/// continuing straight). Returns [`TIMEOUT_SCORE`] if the budget expired;
-/// the caller must ignore that iteration.
+/// (used to prefer faster mates). `qs_left` is remaining quiescence extensions.
+/// `last_dir_*` help move ordering (prefer continuing straight). Returns
+/// [`TIMEOUT_SCORE`] if the budget expired; the caller must ignore that
+/// iteration.
 ///
 /// **Where:** only the iterative-deepening loop in [`choose_move`], and only
 /// when exactly two bikes are alive and still share space.
 /// **Why:** sequential Tron is a two-player game once it is a duel. A few
 /// plies of minimax plus Voronoi leaves beat greedy 1-ply; FFA must not
-/// call this (it treats extra bikes as frozen walls).
+/// call this (it treats extra bikes as frozen walls). Horizon nodes that are
+/// still tactical ([`wants_quiescence`]) search extra plies instead of eval.
 fn negamax_1v1(
     state: &mut State,
     our_id: usize,
     opponent: usize,
     to_move: usize,
-    depth: i32,
+    mut depth: i32,
     ply: i32,
     mut alpha: i32,
     beta: i32,
     last_dir_ours: u8,
     last_dir_opponent: u8,
+    mut qs_left: i32,
     search: &mut Search,
     scratch: &mut Scratch,
 ) -> i32 {
@@ -1194,15 +1377,19 @@ fn negamax_1v1(
         return MATE_SCORE - ply;
     }
 
-    // Leaf: side to move with no reply loses; otherwise static eval, flipped
-    // so the value is from `to_move`’s perspective.
+    // Leaf: side to move with no reply loses. Tactical leaves (adjacent heads,
+    // one escape, or a cut this ply) extend instead of static eval.
     if depth <= 0 {
         let move_count = state.legal_moves(to_move).1;
         if move_count == 0 {
             return -MATE_SCORE + ply;
         }
-        let score = eval_1v1(state, our_id, opponent, ply, scratch);
-        return if to_move == our_id { score } else { -score };
+        if !wants_quiescence(state, our_id, opponent, qs_left, to_move) {
+            let score = eval_1v1(state, our_id, opponent, ply, scratch);
+            return if to_move == our_id { score } else { -score };
+        }
+        depth = 1;
+        qs_left -= 1;
     }
 
     let (mut moves, move_count) = state.legal_moves(to_move);
@@ -1247,6 +1434,7 @@ fn negamax_1v1(
             -alpha,
             next_last_ours,
             next_last_opponent,
+            qs_left,
             search,
             scratch,
         );
@@ -1271,6 +1459,65 @@ fn negamax_1v1(
         }
     }
     best_score
+}
+
+/// Root 1v1 search at `depth` with window `[alpha, beta]` from `our_id`’s seat.
+///
+/// `moves` must already be ordered. Returns `(best_dir, score, completed)`.
+/// On timeout the board is still clean; `completed` is false and the caller
+/// must discard this iteration.
+///
+/// **Where:** the 1v1 iterative-deepening loop in [`choose_move`]. Aspiration
+/// calls this with `[prev ± ASPIRATION_DELTA]`, then again full-window on fail.
+fn search_root_1v1(
+    state: &mut State,
+    our_id: usize,
+    opponent: usize,
+    moves: &[u8; 4],
+    move_count: usize,
+    depth: i32,
+    mut alpha: i32,
+    beta: i32,
+    search: &mut Search,
+    scratch: &mut Scratch,
+) -> (u8, i32, bool) {
+    let mut best_dir = moves[0];
+    let mut best_score = -MATE_SCORE * 2;
+    for move_i in 0..move_count {
+        let old_col = state.head_x[our_id];
+        let old_row = state.head_y[our_id];
+        state.apply(our_id, moves[move_i] as usize);
+        let score = -negamax_1v1(
+            state,
+            our_id,
+            opponent,
+            opponent,
+            depth - 1,
+            1,
+            -beta,
+            -alpha,
+            moves[move_i],
+            NO_MOVE,
+            QS_MAX,
+            search,
+            scratch,
+        );
+        state.undo_step(our_id, old_col, old_row);
+        if search.timed_out {
+            return (best_dir, best_score, false);
+        }
+        if score > best_score {
+            best_score = score;
+            best_dir = moves[move_i];
+        }
+        if score > alpha {
+            alpha = score;
+        }
+        if alpha >= beta {
+            break;
+        }
+    }
+    (best_dir, best_score, true)
 }
 
 /// Next seat after `player`, wrapping in `0..player_count`.
@@ -1497,9 +1744,10 @@ fn fill_direction(
         state.apply(player, legal[move_i] as usize);
         let flood_after = flood_count(state, player, scratch);
         let fill = approx_fill(state, player, scratch);
+        let space = flood_after.min(checkerboard_reach_bound(state, player));
         let col = state.head_x[player] as i32;
         let row = state.head_y[player] as i32;
-        let mut score = fill * 80 + flood_after * 30 + wall_neighbor_count(state, col, row) * 12;
+        let mut score = fill * 80 + space * 30 + wall_neighbor_count(state, col, row) * 12;
         if legal[move_i] == last_dir {
             score += 8;
         }
@@ -1526,10 +1774,14 @@ fn fill_direction(
 /// - 1v1 and the two chambers are cut off → 80-step greedy fill rollout.
 /// - 3+ living players → iterative-deepening paranoid minimax ([`paranoid_min`]
 ///   after each of our moves). The field colludes to minimize [`eval_ffa`].
-///   No 2-ply warmup; ID starts from the first ordered move.
-/// - 1v1 still connected → iterative-deepening [`negamax_1v1`] up to depth 16
-///   or the time budget. There is no 2-ply Voronoi warmup; ID starts from the
-///   first ordered move so search gets the full remaining budget.
+///   No 2-ply warmup; ID starts from the first ordered move, cap 50.
+/// - 1v1 still connected → iterative-deepening [`negamax_1v1`] up to depth 50
+///   or the time budget. After depth 1, each iteration uses an aspiration
+///   window of [`ASPIRATION_DELTA`] around the previous score and re-searches
+///   full-window on fail-high/fail-low (skipped near mate). Tactical leaves
+///   (adjacent heads, one escape, or a cut this ply) extend up to [`QS_MAX`]
+///   extra plies. There is no 2-ply Voronoi warmup; ID starts from the first
+///   ordered move so search gets the full remaining budget.
 ///
 /// `last_dir` is the direction we played last turn (`NO_MOVE` on turn 1); it
 /// is a small move-ordering / fill-continuation hint, not a hard constraint.
@@ -1638,7 +1890,7 @@ fn choose_move(
 
     if !is_duel {
         // FFA: each ID ply is our move, then a colluding Min round (paranoid).
-        let max_ffa_depth = 8;
+        let max_ffa_depth = 50;
         let player_count = state.player_count as usize;
         for depth in 1..=max_ffa_depth {
             if Instant::now() >= search.deadline {
@@ -1693,15 +1945,14 @@ fn choose_move(
             }
         }
     } else {
-        // 1v1: search as deep as time allows (cap 16).
-        let max_depth = 16;
+        // 1v1: search as deep as time allows (cap 50). Depth 1 is full-window;
+        // later depths aspirate around the previous score and re-search on fail.
+        let max_depth = 50;
+        let mut prev_score: Option<i32> = None;
         for depth in 1..=max_depth {
             if Instant::now() >= search.deadline {
                 break;
             }
-            let mut iter_best_dir = principal_dir;
-            let mut iter_best_score = -MATE_SCORE * 2;
-            let mut completed_iteration = true;
             // Re-order using last iteration’s PV and root killers.
             order_moves(
                 state,
@@ -1714,44 +1965,77 @@ fn choose_move(
                 target_col,
                 target_row,
             );
-            for move_i in 0..move_count {
-                let old_col = state.head_x[our_id];
-                let old_row = state.head_y[our_id];
-                state.apply(our_id, moves[move_i] as usize);
-                let score = -negamax_1v1(
+
+            let mut window_alpha = -MATE_SCORE * 2;
+            let mut window_beta = MATE_SCORE * 2;
+            let mut aspired = false;
+            if let Some(prev) = prev_score {
+                if prev.abs() < MATE_SCORE - 200 {
+                    window_alpha = prev.saturating_sub(ASPIRATION_DELTA);
+                    window_beta = prev.saturating_add(ASPIRATION_DELTA);
+                    aspired = true;
+                }
+            }
+
+            let (mut iter_best_dir, mut iter_best_score, mut completed_iteration) =
+                search_root_1v1(
                     state,
                     our_id,
                     opponent,
-                    opponent,
-                    depth - 1,
-                    1,
-                    -MATE_SCORE * 2,
-                    -iter_best_score,
-                    moves[move_i],
-                    NO_MOVE,
+                    &moves,
+                    move_count,
+                    depth,
+                    window_alpha,
+                    window_beta,
                     &mut search,
                     scratch,
                 );
-                state.undo_step(our_id, old_col, old_row);
-                if search.timed_out {
-                    completed_iteration = false;
+            if !completed_iteration {
+                break;
+            }
+            if aspired
+                && (iter_best_score <= window_alpha || iter_best_score >= window_beta)
+            {
+                if Instant::now() >= search.deadline {
                     break;
                 }
-                if score > iter_best_score {
-                    iter_best_score = score;
-                    iter_best_dir = moves[move_i];
+                principal_dir = iter_best_dir;
+                order_moves(
+                    state,
+                    our_id,
+                    &mut moves,
+                    move_count,
+                    principal_dir,
+                    search.killers[0][0],
+                    last_dir,
+                    target_col,
+                    target_row,
+                );
+                let re = search_root_1v1(
+                    state,
+                    our_id,
+                    opponent,
+                    &moves,
+                    move_count,
+                    depth,
+                    -MATE_SCORE * 2,
+                    MATE_SCORE * 2,
+                    &mut search,
+                    scratch,
+                );
+                iter_best_dir = re.0;
+                iter_best_score = re.1;
+                completed_iteration = re.2;
+                if !completed_iteration {
+                    break;
                 }
             }
-            if completed_iteration {
-                principal_dir = iter_best_dir;
-                best_dir = iter_best_dir;
-                best_score = iter_best_score;
-                // Forced mate / loss: no point searching deeper.
-                if iter_best_score.abs() >= MATE_SCORE - 200 {
-                    break;
-                }
-            } else {
-                // Timed out mid-iteration: keep the previous completed PV.
+
+            principal_dir = iter_best_dir;
+            best_dir = iter_best_dir;
+            best_score = iter_best_score;
+            prev_score = Some(iter_best_score);
+            if iter_best_score.abs() >= MATE_SCORE - 200 {
                 break;
             }
         }

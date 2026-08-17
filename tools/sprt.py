@@ -36,11 +36,13 @@ import argparse
 import json
 import math
 import os
+import queue
 import random
 import select
 import signal
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
@@ -63,6 +65,18 @@ DIRS = {
     "LEFT": (-1, 0),
     "RIGHT": (1, 0),
 }
+
+
+def resolve_engine_path(path: str) -> str:
+    """Absolute engine path; on Windows, accept `tron` as `tron.exe`."""
+    resolved = os.path.abspath(path)
+    if os.path.isfile(resolved):
+        return resolved
+    if os.name == "nt" and not resolved.lower().endswith(".exe"):
+        exe = resolved + ".exe"
+        if os.path.isfile(exe):
+            return exe
+    return resolved
 
 # ---------------------------------------------------------------------------
 # SPRT / Elo
@@ -271,6 +285,37 @@ class Engine:
         )
         if self.proc.stdin is None or self.proc.stdout is None or self.proc.stderr is None:
             raise RuntimeError(f"failed to open pipes for {path}")
+        # Windows cannot select() on anonymous pipes; dedicated reader threads
+        # keep stdout timeout and stderr stats working there.
+        self._use_threads = os.name == "nt"
+        self._out_queue: Optional[queue.Queue[Optional[str]]] = None
+        if self._use_threads:
+            self._out_queue = queue.Queue()
+            threading.Thread(target=self._stdout_loop, daemon=True).start()
+            threading.Thread(target=self._stderr_loop, daemon=True).start()
+
+    def _stdout_loop(self) -> None:
+        assert self.proc.stdout is not None
+        assert self._out_queue is not None
+        for line in self.proc.stdout:
+            self._out_queue.put(line)
+        self._out_queue.put(None)
+
+    def _stderr_loop(self) -> None:
+        err = self.proc.stderr
+        if err is None:
+            return
+        for line in err:
+            if self._err_file is not None:
+                self._err_file.write(line)
+            nodes, ms = parse_search_stats(line)
+            if nodes > 0:
+                self.nodes += nodes
+                self.ms += max(ms, 1)
+            self._on_stderr_line(line)
+
+    def _on_stderr_line(self, line: str) -> None:
+        """Hook for the watcher to keep the last `DIR mm …` stderr line."""
 
     def send(self, text: str) -> None:
         assert self.proc.stdin is not None
@@ -282,6 +327,8 @@ class Engine:
 
     def drain_stderr(self) -> None:
         """Parse search-stats lines already written (stderr is emitted before stdout)."""
+        if self._use_threads:
+            return
         err = self.proc.stderr
         if err is None:
             return
@@ -299,8 +346,18 @@ class Engine:
             if nodes > 0:
                 self.nodes += nodes
                 self.ms += max(ms, 1)
+            self._on_stderr_line(line)
 
     def read_line(self, timeout: float) -> str:
+        if self._use_threads:
+            assert self._out_queue is not None
+            try:
+                line = self._out_queue.get(timeout=timeout)
+            except queue.Empty as exc:
+                raise TimeoutError(f"{self.label} timed out after {timeout:.2f}s") from exc
+            if line is None:
+                raise RuntimeError(f"{self.label} exited (code {self.proc.poll()})")
+            return line.strip()
         assert self.proc.stdout is not None
         fd = self.proc.stdout.fileno()
         ready, _, _ = select.select([fd], [], [], timeout)
@@ -672,7 +729,7 @@ def fmt_status(
     line = (
         f"n={wdl.n:4d}  {wdl.wins}-{wdl.draws}-{wdl.losses}  "
         f"{100.0 * wdl.mean:5.1f}% vs {fair:4.1f}%  "
-        f"Elo {wdl.elo():+6.1f} ± {se_s:>5s}  "
+        f"Elo {wdl.elo():+6.1f} +/- {se_s:>5s}  "
         f"LOS {100.0 * wdl.los():5.1f}%  "
         f"LLR {llr:+6.2f} [{lo:+.2f},{hi:+.2f}]  "
         f"SPRT[{elo0:g},{elo1:g}] {wdl.n_players}p"
@@ -683,10 +740,13 @@ def fmt_status(
 
 
 def run_sprt(args: argparse.Namespace, fixed: bool = False) -> int:
-    baseline = os.path.abspath(args.baseline)
-    dev = os.path.abspath(args.dev)
+    baseline = resolve_engine_path(args.baseline)
+    dev = resolve_engine_path(args.dev)
     for p, name in ((baseline, "baseline"), (dev, "dev")):
-        if not os.path.isfile(p) or not os.access(p, os.X_OK):
+        if not os.path.isfile(p):
+            print(f"error: {name} binary not found: {p}", file=sys.stderr)
+            return 2
+        if os.name != "nt" and not os.access(p, os.X_OK):
             print(f"error: {name} binary not executable: {p}", file=sys.stderr)
             return 2
 
@@ -712,7 +772,7 @@ def run_sprt(args: argparse.Namespace, fixed: bool = False) -> int:
         f"fair={100.0 * fair:.1f}%  "
         f"H0={args.elo0:g} Elo ({100.0 * expected_score(args.elo0, n_players):.1f}%)  "
         f"H1={args.elo1:g} Elo ({100.0 * expected_score(args.elo1, n_players):.1f}%)  "
-        f"α={args.alpha:g} β={args.beta:g}  bounds [{lo:.3f}, {hi:.3f}]",
+        f"a={args.alpha:g} b={args.beta:g}  bounds [{lo:.3f}, {hi:.3f}]",
         flush=True,
     )
     print(
@@ -902,7 +962,7 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Referee per-move timeout in seconds (default budget-ms/1000 + 0.25)",
     )
     p.add_argument("--concurrency", type=int, default=os.cpu_count() or 2)
-    p.add_argument("--max-games", type=int, default=2000)
+    p.add_argument("--max-games", type=int, default=10000)
     p.add_argument(
         "--min-games",
         type=int,

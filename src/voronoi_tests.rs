@@ -393,10 +393,10 @@ fn voronoi_gap(state: &State) -> Option<String> {
                 + hug * 5
                 + (mobility(state, 0) - mobility(state, 1))
         } else {
-            let our_mobility = mobility(state, 0);
-            let opp_mobility = mobility(state, 1);
             let territory = slow.territory[0] - slow.territory[1];
             let edges = slow.edge_sum[0] - slow.edge_sum[1];
+            let our_mobility = mobility(state, 0);
+            let opp_mobility = mobility(state, 1);
             let reach = slow.reachable[0] - slow.reachable[1];
             let front = battlefront_cell(&slow.owned[0], &slow.owned[1]);
             let head_col = state.head_x[0] as i32;
@@ -576,6 +576,7 @@ fn root_negamax_score(
             -best,
             moves[i],
             NO_MOVE,
+            QS_MAX,
             &mut search,
             scratch,
         );
@@ -1086,4 +1087,116 @@ fn random_wall_state(rng: &mut XorShift, player_count: usize, walls: u32) -> Sta
             deeper.abs() < MATE_SCORE - 200,
             "depth-8 opening scored {deeper}"
         );
+    }
+
+    #[test]
+    fn quiescence_sees_forced_fill_death() {
+        // P1 has one empty cell, then nowhere. Depth-1 static eval still sees
+        // them alive; QS (mobility ≤ 1) should return a win for P0.
+        let mut state = two_player_at((10, 10), (0, 0));
+        add_walls(&mut state, &[(1, 0), (0, 2), (1, 1)]);
+        assert_eq!(state.legal_moves(1).1, 1);
+        let mut scratch = Scratch::new();
+        let before = state;
+        let score = root_negamax_score(&mut state, 0, 1, 1, &mut scratch);
+        assert_same_state(&before, &state, "qs-undo");
+        assert!(
+            score >= MATE_SCORE - 200,
+            "quiescence should see P1 die after their last cell, got {score}"
+        );
+    }
+
+    /// Occupy every cell except the two heads and `keep`.
+    fn wall_all_except(state: &mut State, keep: &[(i32, i32)]) {
+        for row in 0..HEIGHT {
+            for col in 0..WIDTH {
+                let mut skip = false;
+                for player in 0..state.player_count as usize {
+                    if state.is_alive(player)
+                        && state.head_x[player] as i32 == col
+                        && state.head_y[player] as i32 == row
+                    {
+                        skip = true;
+                    }
+                }
+                if skip || keep.iter().any(|&cell| cell == (col, row)) {
+                    continue;
+                }
+                state.occupied.set(col, row);
+            }
+        }
+    }
+
+    #[test]
+    fn checkerboard_path_bound_formula() {
+        assert_eq!(checkerboard_path_bound(0, 0, 0), 0);
+        assert_eq!(checkerboard_path_bound(0, 1, 0), 1);
+        assert_eq!(checkerboard_path_bound(1, 0, 1), 1);
+        assert_eq!(checkerboard_path_bound(0, 5, 5), 10);
+        assert_eq!(checkerboard_path_bound(0, 6, 5), 11);
+        assert_eq!(checkerboard_path_bound(0, 5, 6), 10);
+        assert_eq!(checkerboard_path_bound(1, 5, 6), 11);
+        assert_eq!(checkerboard_path_bound(1, 1, 4), 3);
+    }
+
+    #[test]
+    fn approx_fill_caps_3x3_minority_entry() {
+        // 3×3 empty room: 5 even, 4 odd. Enter from (2,0) onto (2,1) (odd),
+        // so a path can take at most 8 cells. Uncut DFS would count all 9.
+        let mut state = two_player_at((2, 0), (29, 19));
+        let mut room = Vec::new();
+        for row in 1..4 {
+            for col in 1..4 {
+                room.push((col, row));
+            }
+        }
+        wall_all_except(&mut state, &room);
+        let mut scratch = Scratch::new();
+        assert_eq!(flood_count(&state, 0, &mut scratch), 9);
+        assert_eq!(checkerboard_reach_bound(&state, 0), 8);
+        assert_eq!(approx_fill(&state, 0, &mut scratch), 8);
+    }
+
+    #[test]
+    fn approx_fill_caps_plus_shape() {
+        // Plus of 5 cells. The 8-ring local-cut test treats the centre as
+        // connected (open_count == 4), so DFS would sum; checkerboard caps
+        // a path from the stem at 3.
+        let mut state = two_player_at((5, 3), (29, 19));
+        wall_all_except(
+            &mut state,
+            &[(5, 4), (5, 5), (5, 6), (4, 5), (6, 5)],
+        );
+        let mut scratch = Scratch::new();
+        assert_eq!(flood_count(&state, 0, &mut scratch), 5);
+        assert_eq!(checkerboard_reach_bound(&state, 0), 3);
+        assert_eq!(approx_fill(&state, 0, &mut scratch), 3);
+    }
+
+    #[test]
+    fn checkerboard_bound_never_exceeds_flood() {
+        let mut rng = XorShift::new(23);
+        let mut scratch = Scratch::new();
+        for _ in 0..40 {
+            let plies = rng.gen_range(24);
+            let state = random_play_state(&mut rng, 2, plies);
+            for player in 0..2 {
+                if !state.is_alive(player) {
+                    continue;
+                }
+                let flood = flood_count(&state, player, &mut scratch);
+                let bound = checkerboard_reach_bound(&state, player);
+                let fill = approx_fill(&state, player, &mut scratch);
+                assert!(
+                    bound <= flood,
+                    "player {player} bound {bound} > flood {flood}\n{}",
+                    dump_board(&state)
+                );
+                assert!(
+                    fill <= bound,
+                    "player {player} fill {fill} > bound {bound}\n{}",
+                    dump_board(&state)
+                );
+            }
+        }
     }

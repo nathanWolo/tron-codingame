@@ -5,9 +5,10 @@ Reuses the SPRT referee (CodinGame stdin/stdout protocol, seed plies, death
 clears the ribbon). Paints Voronoi ownership and whether the bikes still share
 space, plus each engine's last stderr line (`DIR mm SCORE Tms n=`).
 
-    tools/watch.sh                  # build candidate, then open the window
-    python3 tools/watch.py          # if binaries already exist
-    python3 tools/watch.py --players 3 --budget-ms 20
+    python tools/watch.py --build   # cargo build, then open (Windows or Linux)
+    tools/watch.sh                  # Linux/macOS wrapper
+    tools/watch.cmd                 # Windows wrapper (not blocked by ExecutionPolicy)
+    python tools/watch.py --players 3 --budget-ms 20
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import argparse
 import os
 import queue
 import random
-import select
+import subprocess
 import sys
 import threading
 import time
@@ -41,6 +42,7 @@ from sprt import (  # noqa: E402
     parse_search_stats,
     pick_starts,
     random_seed_moves,
+    resolve_engine_path,
 )
 
 CELL = 24
@@ -66,6 +68,24 @@ MUTED = "#8b95a8"
 ACCENT = "#3ec6ff"
 CUT = "#ff6b6b"
 OPEN = "#7ee787"
+
+
+def host_platform() -> str:
+    """Short OS name for logs and the window title."""
+    if os.name == "nt":
+        return "Windows"
+    if sys.platform.startswith("linux"):
+        return "Linux"
+    if sys.platform == "darwin":
+        return "macOS"
+    return sys.platform
+
+
+def gui_available() -> bool:
+    """Tk can open a window on this session."""
+    if os.name == "nt":
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 def role_colors(is_candidate: bool, baseline_index: int) -> tuple[str, str, str]:
@@ -219,27 +239,17 @@ class WatchEngine(Engine):
         self.last_stderr = ""
         self.last_mm: dict = parse_mm_line("")
 
-    def drain_stderr(self) -> None:
-        err = self.proc.stderr
-        if err is None:
+    def _on_stderr_line(self, line: str) -> None:
+        line = line.rstrip("\n")
+        if not line:
             return
-        fd = err.fileno()
-        while True:
-            ready, _, _ = select.select([fd], [], [], 0)
-            if not ready:
-                return
-            line = err.readline()
-            if line == "":
-                return
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            self.last_stderr = line
-            self.last_mm = parse_mm_line(line)
-            nodes, ms = parse_search_stats(line)
-            if nodes > 0:
-                self.nodes += nodes
-                self.ms += max(ms, 1)
+        self.last_stderr = line
+        self.last_mm = parse_mm_line(line)
+
+    def sync_stderr(self) -> None:
+        """Windows stderr is a sibling thread; give it a beat after stdout."""
+        if self._use_threads:
+            time.sleep(0.008)
 
 
 class Control:
@@ -415,6 +425,7 @@ def play_watched_game(
             kill(p)
             reason = str(e)
             return None
+        engines[p].sync_stderr()
         return raw.split()[0].upper() if raw.split() else ""
 
     def paced() -> bool:
@@ -545,7 +556,7 @@ class Watcher:
         self._heads: list[int] = []
 
         self.root = tk.Tk()
-        self.root.title("Tron — candidate vs baseline")
+        self.root.title(f"Tron — candidate vs baseline  [{host_platform()}]")
         self.root.configure(bg=BG)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -640,7 +651,7 @@ class Watcher:
         self._btn(btns2, "Swap + replay", self.swap_replay).pack(side=tk.LEFT)
 
         help_txt = (
-            "Space pause  ·  N new  ·  R replay  ·  S step\n"
+            f"host {host_platform()}  ·  Space pause  ·  N new  ·  R replay  ·  S step\n"
             "V overlay  ·  same protocol as SPRT"
         )
         tk.Label(
@@ -991,6 +1002,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed-plies", type=int, default=4)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
+        "--build",
+        action="store_true",
+        help="run `cargo build --release` before opening the window",
+    )
+    p.add_argument(
         "--book",
         default="",
         help="Opening book JSON, 'none', or empty for the default N-player book",
@@ -1007,15 +1023,43 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    host = host_platform()
+    io_mode = "threaded engine I/O" if os.name == "nt" else "select() on pipes"
+    print(f"host: {host}  ({io_mode})", flush=True)
+
+    if args.build:
+        print("building candidate with cargo build --release ...", flush=True)
+        built = subprocess.run(["cargo", "build", "--release"], cwd=ROOT)
+        if built.returncode != 0:
+            return built.returncode
+
+    args.baseline = resolve_engine_path(args.baseline)
+    args.dev = resolve_engine_path(args.dev)
     for path, name in ((args.baseline, "baseline"), (args.dev, "dev")):
-        if not os.path.isfile(path) or not os.access(path, os.X_OK):
-            print(f"error: {name} binary not executable: {path}", file=sys.stderr)
-            print("Build with cargo build --release and/or tools/save_baseline.sh", file=sys.stderr)
+        if not os.path.isfile(path):
+            print(f"error: {name} binary not found: {path}", file=sys.stderr)
+            if name == "baseline":
+                print("hint: tools/save_baseline.sh  (or copy target/release/tron[.exe])", file=sys.stderr)
+            else:
+                print("hint: cargo build --release  (or pass --build)", file=sys.stderr)
             return 2
-    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
-        print("error: no DISPLAY; this GUI needs a local desktop session", file=sys.stderr)
+        if os.name != "nt" and not os.access(path, os.X_OK):
+            print(f"error: {name} binary not executable: {path}", file=sys.stderr)
+            return 2
+    print(f"baseline: {args.baseline}", flush=True)
+    print(f"dev:      {args.dev}", flush=True)
+
+    if not gui_available():
+        print(
+            f"error: no display on {host}; set DISPLAY or WAYLAND_DISPLAY",
+            file=sys.stderr,
+        )
         return 2
-    Watcher(args)
+    try:
+        Watcher(args)
+    except tk.TclError as e:
+        print(f"error: cannot open GUI on {host}: {e}", file=sys.stderr)
+        return 2
     tk.mainloop()
     return 0
 
