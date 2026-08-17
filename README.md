@@ -1,8 +1,8 @@
 # Tron Battle agent (CodinGame)
 
-A Rust bot for [CodinGame Tron Battle](https://www.codingame.com/multiplayer/bot-programming/tron-battle). The whole agent is a **single file** (`src/main.rs`) so it can be pasted into the CodinGame IDE.
+A Rust bot for [CodinGame Tron Battle](https://www.codingame.com/multiplayer/bot-programming/tron-battle). The **shipped agent is a single file** (`src/main.rs`, under the 100k-character IDE limit) so it can be pasted into the CodinGame IDE. Local bench, unit tests, SPRT, and the board watcher live beside it and are not part of the paste.
 
-The bot plays light-cycle Tron on a 30×20 grid. In 1v1 it uses iterative-deepening minimax with a Voronoi territory evaluation. Once the two bikes can no longer reach each other, it switches to a survival / space-filling policy. Matches with 3–4 players use iterative-deepening paranoid minimax: we maximize a survival eval, and every other living bike is assumed to collude to minimize it.
+The bot plays light-cycle Tron on a 30×20 grid. In 1v1 it uses iterative-deepening minimax with a **row-bitboard Voronoi** territory evaluation. Once the two bikes can no longer reach each other, it switches to a survival / space-filling policy. Matches with 3–4 players use iterative-deepening paranoid minimax: we maximize a survival eval, and every other living bike is assumed to collude to minimize it.
 
 ---
 
@@ -56,10 +56,13 @@ No crates.io dependencies. CodinGame compiles a single Rust file with `std` only
 
 ```bash
 cargo run --release                 # CodinGame stdin/stdout loop
-cargo run --release -- --bench      # self-play vs baseline bots
+cargo run --release -- --bench      # self-play vs dummy bots (src/local.rs)
 cargo run --release -- --profile    # eval throughput + one timed search
 cargo test --bin tron               # Voronoi / search tests
-tools/sprt.sh                       # candidate binary vs frozen baseline
+cargo test --bin tron --release     # plus exhaustive empty-board pair checks
+tools/save_baseline.sh              # freeze target/release/tron → bin/tron-baseline
+tools/sprt.sh                       # SPRT: candidate vs frozen baseline
+tools/watch.sh                      # live 30×20 viewer, same referee as SPRT
 ```
 
 Release profile is aggressive because the same file is what you submit:
@@ -79,7 +82,35 @@ panic = "abort"
 3. Play a few IDE games. Stderr lines look like `DOWN mm 1840 75ms n=12345` (direction, last completed search score, milliseconds used, nodes). Open 1v1 and FFA both print that leftover score; isolated fill / endgame do not.
 4. If you timeout, lower `TURN_BUDGET_MS` / `FIRST_TURN_BUDGET_MS` at the top of the file.
 
-`--bench` and `--profile` are `src/local.rs` (default `local` feature). The CodinGame judge passes no argv and compiles only the pasted file, so they never run there. Engine-vs-engine testing is `tools/sprt.sh`.
+`--bench` and `--profile` live in `src/local.rs` (Cargo feature `local`, on by default). The CodinGame judge passes no argv and compiles only the pasted file, so they never run there. Engine-vs-engine testing is `tools/sprt.sh`. `cargo build --release --no-default-features` is a CodinGame-like binary (agent loop only).
+
+---
+
+## Watch a game
+
+`tools/watch.sh` rebuilds the candidate and opens a Tk window where it plays `bin/tron-baseline` using the **same CodinGame protocol** as SPRT (seed plies, sequential turns, death clears the ribbon).
+
+```bash
+tools/watch.sh                 # 80 ms/turn (closer to CodinGame)
+tools/watch.sh --budget-ms 20  # same think time as default SPRT
+tools/watch.sh --players 3     # 1 candidate vs 2 baselines
+```
+
+Cyan is the candidate, orange (and extra hues in FFA) is the baseline. Empty cells are tinted by Voronoi owner; contested cells are dull. The sidebar is **OPEN** while the bikes still share space (Voronoi leaf) and **CUT** when they are in separate chambers (fill eval, ×60 scale). Each engine’s last stderr line is shown (`DIR mm SCORE Tms n=…`). Older frozen baselines that do not print `n=` show `(no stderr stats)`.
+
+| key / control | action |
+|---------------|--------|
+| Space | pause / resume |
+| `N` | new random opening |
+| `R` | replay the same spawn and seed walk |
+| `S` | step one ply |
+| `V` | toggle Voronoi overlay |
+| Swap + replay | flip seats on the same opening |
+| Auto next game | start another game when one ends |
+| Candidate moves first | candidate is P0 (uncheck → P1) |
+| budget / delay / seed plies | spinboxes in the sidebar |
+
+Needs a local display (`DISPLAY` or `WAYLAND_DISPLAY`).
 
 ---
 
@@ -94,7 +125,7 @@ An **N-player** game is **1 candidate vs N−1 copies of the baseline**. Games a
 CodinGame does **not** ship a named opening book. Starts are uniform random unique cells on the 30×20 grid. SPRT therefore:
 
 1. Picks a spawn from `tools/openings_1v1.json` / `openings_3p.json` / `openings_4p.json` — 256 frozen N-tuples sampled from that distribution (2p entry 0 is the statement example `(9,5)` / `(10,7)`).
-2. Plays `--seed-plies` (default **4**) referee-chosen random legal moves per side. Engines still receive every ply so their trail tracker stays in sync; the referee applies the seeded walk instead of the engine’s choice. Seat-rotated games reuse the same spawn and the same walk.
+2. Plays `--seed-plies` (default **4**) referee-chosen random legal moves **per side**. A ply is one step by one bike, so 1v1 with 4 seed plies is eight forced steps. Engines still receive every frame so their trail tracker stays in sync; the referee **ignores** their output and applies the canned walk. Seat-rotated games reuse the same spawn and the same walk.
 
 Pass `--book none` for a fresh uniform spawn every block, or `--seed-plies 0` to start from the spawn cells with no extra walk.
 
@@ -119,14 +150,16 @@ tools/sprt.sh                   # default: H0=0 Elo, H1=+10 Elo, α=β=0.05, 20 
 
 `tools/sprt.sh` rebuilds `target/release/tron` as **dev** and pits it against `bin/tron-baseline`. Extra flags are forwarded to `tools/sprt.py`.
 
-### Watch a game
+### Latest vs the frozen baseline
 
-```bash
-tools/watch.sh                 # build candidate, then open a 30×20 window
-tools/watch.sh --budget-ms 20  # same think time as default SPRT
-```
+The frozen `bin/tron-baseline` is paranoid FFA + cell-BFS Voronoi (saved before the bitboard / mate-sign work). After scoring 1v1 terminals from the side to move (see [Evaluation poison](#evaluation-poison-we-had-to-remove)):
 
-Cyan is the candidate, orange is the baseline. The overlay tints empty cells by Voronoi owner; the sidebar switches **OPEN** (shared space, Voronoi eval) vs **CUT** (separate chambers, fill eval). Space pauses, `N` new game, `R` replay the same opening, `S` steps one ply.
+| match | decision | n | score | Elo |
+|-------|----------|---|-------|-----|
+| 1v1 SPRT `[0, 10]`, 20 ms | **ACCEPT H1** | 446 | 62.6% vs 50% | **+89.2 ± 17.0** |
+| 4p SPRT `[0, 10]`, 20 ms (1 vs 3) | **ACCEPT H1** | 1004 | 31.7% vs 25% | **+57.3 ± 11.8** |
+
+The same 1v1 SPRT **before** the mate-sign fix accepted H0 at about **−35 Elo**: extra depth was real, but a forced win was coming back as `-MATE`, so deeper search looked worse.
 
 ### Hypotheses
 
@@ -154,6 +187,9 @@ tools/sprt.sh --fixed --max-games 200
 
 # 3-player FFA (1 candidate vs 2 baselines); fair prior is 33.3%
 tools/sprt.sh --players 3 --fixed --max-games 120
+
+# 4-player FFA (1 candidate vs 3 baselines); fair prior is 25%
+tools/sprt.sh --players 4
 
 # More search (closer to CodinGame, slower)
 tools/sprt.sh --budget-ms 40 --concurrency 4
@@ -217,7 +253,7 @@ stdout: UP|DOWN|LEFT|RIGHT
 
 `State` is `Copy` (~400 bytes). 1v1 search applies a move, recurses, then `undo_step`s. FFA paranoid search copies the state so Min can kill without undoing. There is no heap allocation on the hot path except a couple of tiny `Vec`s at the root of `choose_move`.
 
-Reusable BFS buffers live in `Scratch` (distance maps, queue, visit stamps) so evaluation does not allocate.
+Reusable fill/flood buffers live in `Scratch` (queue + visit stamps). Voronoi no longer uses those: it expands 20-row bitboards on the stack. The separated-rate counters (`CHOOSE_MOVE_COUNT` and friends) exist only with the `local` feature / `cargo test`; they are not in the CodinGame paste.
 
 ---
 
@@ -302,7 +338,7 @@ Two tests, either is enough to stay in “open” mode (we would rather keep fig
 1. **`shares_space`** — heads are orthogonally adjacent, **or** BFS from us reaches an empty neighbour of their head.
 2. **`voronoi.still_connected`** — some empty cell is reachable by both.
 
-Only if **both** say we are cut off do we enter endgame. An early-game sanity counter (`EARLY_SEPARATION_COUNT`) checks that we never mark “separated” while fewer than 24 cells are occupied; in benches that counter stayed at 0.
+Only if **both** say we are cut off do we enter endgame. With the `local` feature, an early-game sanity counter (`EARLY_SEPARATION_COUNT`) checks that we never mark “separated” while fewer than 24 cells are occupied; in benches that counter stayed at 0.
 
 Once cut off, each player’s remaining life is independent. The one who can occupy more of their pocket wins.
 
@@ -357,12 +393,13 @@ for depth = 1 ..= 16:
 
 If even depth 1 cannot finish, we play that first ordered move. Root window: later moves are searched with beta = `-best_so_far` (fail-low pruning).
 
-Leaf / no-move handling is sequential-correct:
+Every negamax return is from **`to_move`’s** point of view so the caller can negate:
 
-- Player to move with 0 legal moves dies immediately (`±MATE_SCORE ± ply`).
-- Eval is always from **our** perspective, then negated if it is the opponent’s turn (standard negamax).
+- Side to move with 0 legal moves (or already dead) → `-MATE_SCORE + ply` (they lose).
+- The other bike already dead → `MATE_SCORE - ply`.
+- Quiet leaf → `eval_1v1` from `our_id`, then negated if it is the opponent’s turn.
 
-`MATE_SCORE = 1_000_000`. Closer mates score slightly higher (`MATE_SCORE - ply`).
+`MATE_SCORE = 1_000_000`. Closer mates score slightly higher (`MATE_SCORE - ply`). Scoring terminals from `our_id` instead of `to_move` made a forced win come back as `-MATE` after the root negation — search then “found mate” on move 1 of an empty board and stopped deepening. That is why extra depth lost Elo until the sign was fixed.
 
 ### Move ordering
 
@@ -402,7 +439,7 @@ When only two remain, the game becomes the 1v1 path (minimax + endgame fill). De
 
 `main_opponent` is the live enemy whose head we can reach soonest (BFS). FFA uses that head as the move-ordering target.
 
-SPRT[0,10] vs the previous greedy-reply FFA search (20 ms/turn, 1 candidate vs N−1 baselines): **+94.5 ± 16.3 Elo** in 3p (46.3% vs 33.3%) and **+38.8 ± 10.0 Elo** in 4p (29.4% vs 25.0%).
+Switching FFA from greedy-reply search to paranoid minimax (20 ms/turn, 1 candidate vs N−1 copies of that older search): **+94.5 ± 16.3 Elo** in 3p (46.3% vs 33.3%) and **+38.8 ± 10.0 Elo** in 4p (29.4% vs 25.0%). Current strength vs the frozen paranoid baseline is in [Latest vs the frozen baseline](#latest-vs-the-frozen-baseline).
 
 ---
 
@@ -422,11 +459,26 @@ A real winning cut (200 vs 10) still dwarfs open-game scores. A 50–49 cut is a
 
 Blending 1-ply with deep scores, or capping depth at 1, did not fix it; the explosion in the leaf eval was the bug.
 
+A later bug had the same shape with **mate scores**. Quiet leaves were already from `to_move` (so the root can negate). Terminals (`0` legal moves, dead bike) were still from **our seat**. A line that trapped the opponent therefore came back as “we got mated.” Iterative deepening saw `|score| ≥ mate`, printed e.g. `RIGHT mm -999985`, and quit at ~34 ms on the statement opening. Gameplay still looked fine because the PV was often just the first ordered move. Fix: every mate return is from `to_move` as well (`-MATE` = side to move loses). After that, the same opening uses the full budget and reports a normal eval (`DOWN mm -18380` at 80 ms). Unifying the *leaf formula* (always Voronoi, never fill) made the depth-16 vs depth-8 match **worse**; do not re-apply that.
+
+---
+
+## Tests
+
+`src/voronoi_tests.rs` is compiled only by `cargo test` (not pasted). It compares the bitboard Voronoi against an independent cell-BFS implementation (territory, edges, reach, connected, owned, `shares_space`, battlefront, `eval_1v1` / `eval_ffa`, `main_opponent`), walks short minimax trees with undo checks, and asserts `choose_move` restores the board.
+
+Search smokes: trapping a boxed-in opponent at depth 1 is a **win**, and the statement opening at depth 8 is **not** a mate. Release-only tests enumerate every empty-board 2-player pair and every pair with a mid-board wall.
+
+```bash
+cargo test --bin tron
+cargo test --bin tron --release
+```
+
 ---
 
 ## Local testing
 
-`--bench` plays 12 games per 1v1 matchup (colours swapped) plus 8 four-player games. Opponent bots:
+`--bench` (`src/local.rs`) plays 12 games per 1v1 matchup (colours swapped) plus 8 four-player games. Opponent bots:
 
 | name | policy |
 |------|--------|
@@ -459,7 +511,7 @@ If both players are still alive after 900 rounds, the bench awards the larger fl
 - **Apply / undo:** `occupy` sets occupied + trail + head; `undo_step` clears the *current* head cell and restores the previous head. Search only applies moves already known legal.
 - **Visit stamps** instead of `memset` on flood fills (`Scratch::next_generation`).
 - **Integer-only eval**, no transposition table. A Zobrist TT was tried and measured ~0 Elo (hits were almost all previous-iteration depth-misses; sequential Tron transposes rarely), so it was reverted. Four-wide branching plus alpha-beta is enough on a 600-cell board.
-- **Debug** goes to stderr (`eprintln!`), which CodinGame shows in the IDE and ignores for scoring.
+- **Debug** goes to stderr (`eprintln!` + flush), which CodinGame shows in the IDE and ignores for scoring. After a completed search the line is `DIR mm SCORE Tms n=NODES`. Isolated fill / one-legal-move turns do not print it. SPRT parses `n=` / `Tms` for the NPS column.
 
 ---
 
@@ -467,9 +519,11 @@ If both players are still alive after 900 rounds, the bench awards the larger fl
 
 | path | CodinGame? |
 |------|------------|
-| `src/main.rs` | yes, entire file |
-| `Cargo.toml` | no (their compiler) |
-| `--bench` / `--profile` | harmless if pasted; they only run with argv |
+| `src/main.rs` | **yes — paste this file only** (~69k characters, limit 100k) |
+| `src/local.rs` | no (`--bench` / `--profile`) |
+| `src/voronoi_tests.rs` | no (`cargo test`) |
+| `Cargo.toml` | no (their compiler; no `local` feature there) |
+| `tools/*` | no (SPRT, watcher, opening books) |
 
 ---
 
