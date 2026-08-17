@@ -2,7 +2,7 @@
 
 A Rust bot for [CodinGame Tron Battle](https://www.codingame.com/multiplayer/bot-programming/tron-battle). The whole agent is a **single file** (`src/main.rs`) so it can be pasted into the CodinGame IDE.
 
-The bot plays light-cycle Tron on a 30×20 grid. In 1v1 it uses iterative-deepening minimax with a Voronoi territory evaluation. Once the two bikes can no longer reach each other, it switches to a survival / space-filling policy. Matches with 3–4 players use a shallower greedy model of the others.
+The bot plays light-cycle Tron on a 30×20 grid. In 1v1 it uses iterative-deepening minimax with a Voronoi territory evaluation. Once the two bikes can no longer reach each other, it switches to a survival / space-filling policy. Matches with 3–4 players use iterative-deepening paranoid minimax: we maximize a survival eval, and every other living bike is assumed to collude to minimize it.
 
 ---
 
@@ -70,7 +70,7 @@ panic = "abort"
 
 1. Open Tron Battle, language **Rust**.
 2. Paste `src/main.rs`.
-3. Play a few IDE games. Stderr lines look like `DOWN mm 0 75ms` (direction, leftover score, milliseconds used). The middle number is the FFA 2-ply score, or `0` in 1v1 (iterative deepening does not write it).
+3. Play a few IDE games. Stderr lines look like `DOWN mm 1840 75ms` (direction, last completed search score, milliseconds used). Open 1v1 and FFA both print that leftover score; isolated fill / endgame do not.
 4. If you timeout, lower `TURN_BUDGET_MS` / `FIRST_TURN_BUDGET_MS` at the top of the file.
 
 `--bench` and `--profile` never run on CodinGame (no CLI args there).
@@ -184,8 +184,9 @@ Tracker          reconstructs occupancy from successive (tail, head) pairs
 choose_move
     ├─ 0 or 1 legal move → play it
     ├─ 3+ alive (FFA)
-    │     2-ply: we move, others reply with oneply_direction
-    │     score eval_ffa (no deep search)
+    │     iterative-deepening paranoid minimax (cap 8 our-plies)
+    │     we maximize eval_ffa; every other living bike colludes to minimize it
+    │     (no 2-ply warmup)
     ├─ 1v1, bikes still share space
     │     iterative-deepening alpha-beta from the first ordered move
     │     (no 2-ply Voronoi warmup)
@@ -197,7 +198,7 @@ choose_move
 stdout: UP|DOWN|LEFT|RIGHT
 ```
 
-`State` is `Copy` (~400 bytes). Search applies a move, recurses, then `undo_step`s. There is no heap allocation on the hot path except a couple of tiny `Vec`s at the root of `choose_move`.
+`State` is `Copy` (~400 bytes). 1v1 search applies a move, recurses, then `undo_step`s. FFA paranoid search copies the state so Min can kill without undoing. There is no heap allocation on the hot path except a couple of tiny `Vec`s at the root of `choose_move`.
 
 Reusable BFS buffers live in `Scratch` (distance maps, queue, visit stamps) so evaluation does not allocate.
 
@@ -366,12 +367,9 @@ Budgets: 85 ms first turn, 75 ms later (CodinGame limit 100 ms). SPRT passes `--
 
 ## Free-for-all (3–4 players)
 
-Max-N on four players is too bushy for 75 ms.
+Max-N on four players is too bushy for 75 ms. Do **not** run deep 1v1 minimax either: it treats extra bikes as frozen walls and suicides into fights.
 
-When more than two bikes are alive:
-
-- Do **not** run deep 1v1 minimax (it treats others as frozen walls and suicides into fights).
-- Instead: try each of our moves, then let every other player in turn order play `oneply_direction` (or die and vanish). Score `eval_ffa + 20 * our_flood`.
+Instead FFA uses **paranoid minimax**. We maximize `eval_ffa`; every other living bike is a Min player that colludes to minimize that same score. Depth counts *our* plies. After each of our moves, Min walks seating order (skipping the dead) until it is our turn again. Scores stay in our POV (no negamax flip); alpha-beta prunes on that orientation. Iterative deepening starts from the first `order_moves` candidate, cap 8, no 2-ply warmup.
 
 `eval_ffa` prefers surviving with space:
 
@@ -383,7 +381,9 @@ When more than two bikes are alive:
 
 When only two remain, the game becomes the 1v1 path (minimax + endgame fill). Dead players’ trails are already gone, so the board opens up — that is unique to this CodinGame ruleset.
 
-`main_opponent` is the live enemy whose head we can reach soonest (BFS), used if we ever 1v1-search in a multi-player setting.
+`main_opponent` is the live enemy whose head we can reach soonest (BFS). FFA uses that head as the move-ordering target.
+
+SPRT[0,10] vs the previous greedy-reply `search_ffa` (20 ms/turn, 1 candidate vs N−1 baselines): **+94.5 ± 16.3 Elo** in 3p (46.3% vs 33.3%) and **+38.8 ± 10.0 Elo** in 4p (29.4% vs 25.0%).
 
 ---
 
@@ -441,7 +441,7 @@ If both players are still alive after 900 rounds, the bench awards the larger fl
 - **Visit stamps** instead of `memset` on flood fills (`Scratch::next_generation`).
 - **Integer-only eval**, no transposition table. A Zobrist TT was tried and measured ~0 Elo (hits were almost all previous-iteration depth-misses; sequential Tron transposes rarely), so it was reverted. Four-wide branching plus alpha-beta is enough on a 600-cell board.
 - **Debug** goes to stderr (`eprintln!`), which CodinGame shows in the IDE and ignores for scoring.
-- Dead helpers (`search_endgame`, `search_ffa`, `rollout_score`, …) remain in the file under `#![allow(dead_code)]` from earlier experiments. They are unused by `choose_move` today.
+- Dead helpers (`search_endgame`, `search_ffa`, `play_opponents_greedy`, `rollout_score`, …) remain in the file under `#![allow(dead_code)]` from earlier experiments. They are unused by `choose_move` today.
 
 ---
 
@@ -458,12 +458,11 @@ If both players are still alive after 900 rounds, the bench awards the larger fl
 ## Ideas that would still help
 
 1. **Faster Voronoi** — eval is the nodes-per-second bottleneck; a cheaper distance / territory pass would buy real depth.
-2. **Wire `search_ffa`** into `choose_move` when 3+ are alive (the function exists but FFA currently uses only the 2-ply greedy).
-3. **True articulation points (Tarjan) + chamber tree** instead of the local 8-ring cut test; this is the contest-winning eval idea from a1k0n (ignore non-battlefront chambers when you must choose).
-4. **Checkerboard bound** on fillable space (surplus of one colour is unfillable).
-5. **Quiescence / search extension** when heads are adjacent or a cut appears in one ply.
-6. **FFA survival:** stay away from multi-enemy squeezes; currently the 4-player mode is much weaker than 1v1.
-7. **Self-play tuning** of the open-game weights (`50 / 12 / 3 / 6 / 4`) against the voronoi-1ply baseline and against copies of itself.
+2. **True articulation points (Tarjan) + chamber tree** instead of the local 8-ring cut test; this is the contest-winning eval idea from a1k0n (ignore non-battlefront chambers when you must choose).
+3. **Checkerboard bound** on fillable space (surplus of one colour is unfillable).
+4. **Quiescence / search extension** when heads are adjacent or a cut appears in one ply.
+5. **Less-paranoid FFA** — Max-N or a mixed “they fill, they attack” model if the coalition assumption is too scared in 4p.
+6. **Self-play tuning** of the open-game weights (`50 / 12 / 3 / 6 / 4`) against the voronoi-1ply baseline and against copies of itself.
 
 ---
 

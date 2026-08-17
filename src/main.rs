@@ -6,8 +6,9 @@
 //! **1v1:** iterative-deepening alpha-beta with a Voronoi territory eval.
 //! When the two bikes can no longer reach each other, switch to greedy
 //! space-fill (survive as long as possible in our chamber).
-//! **FFA (3–4 players):** iterative-deepening [`search_ffa`] — we branch, others
-//! reply with greedy fill. Deep 1v1 minimax is not used (it suicides into fights).
+//! **FFA (3–4 players):** iterative-deepening paranoid minimax — we maximize
+//! [`eval_ffa`], every other living bike colludes to minimize it. Deep 1v1
+//! minimax (frozen extra bikes) is not used.
 
 #![allow(dead_code)]
 
@@ -943,7 +944,7 @@ fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &m
 /// and add mobility so we do not get boxed in. Death / sole survivor use mate
 /// scores like [`eval_1v1`].
 ///
-/// **Where:** the FFA leaves of [`search_ffa`] / [`choose_move`]; [`oneply_direction`]
+/// **Where:** leaves of [`paranoid_max`] / [`search_ffa`]; [`oneply_direction`]
 /// when 2+ rivals are alive; unused [`rollout_score`].
 /// **Why:** deep 1v1 minimax in a 3–4 player game treats others as frozen walls
 /// and suicides. This leaf prefers “survive with space” over picking a fight.
@@ -1326,15 +1327,11 @@ fn play_opponents_greedy(state: &mut State, our_id: usize, scratch: &mut Scratch
     }
 }
 
-/// FFA search: we branch on our moves; every other player replies with
-/// [`greedy_direction`] (or dies if they have no move).
+/// Previous FFA policy: we branch, others reply with [`greedy_direction`].
 ///
-/// **Where:** iterative deepening in [`choose_move`] when 3+ bikes are alive.
-/// The root loop applies our move and [`play_opponents_greedy`], then calls
-/// this with the remaining depth.
-/// **Why:** deep 1v1 minimax in FFA treats extra bikes as frozen walls and
-/// suicides. This keeps a “they fill space greedily” model so we can look
-/// several of *our* plies ahead without a 4-player Max-N tree.
+/// **Where:** unused by [`choose_move`] (paranoid minimax replaced it).
+/// Kept so we can revert without rewriting.
+/// **Why it exists:** SPRT[0,10] accepted this vs 2-ply oneply (~+32 Elo 3p).
 fn search_ffa(
     state: &State,
     our_id: usize,
@@ -1397,14 +1394,208 @@ fn search_ffa(
     best_score
 }
 
+/// Next seat after `player`, wrapping in `0..player_count`.
+#[inline]
+fn next_seat(player: usize, player_count: usize) -> usize {
+    (player + 1) % player_count
+}
+
+/// Max node of paranoid FFA search: it is `our_id`’s turn.
+///
+/// `depth` is remaining *our* plies before a leaf. Score is always from our
+/// point of view (no negamax flip). Alpha-beta uses that same orientation.
+///
+/// **Where:** [`paranoid_min`] after a full opponent round, when depth remains.
+/// **Why:** the Max half of “we vs a colluding field.”
+fn paranoid_max(
+    state: &State,
+    our_id: usize,
+    depth: i32,
+    ply: i32,
+    mut alpha: i32,
+    beta: i32,
+    search: &mut Search,
+    scratch: &mut Scratch,
+) -> i32 {
+    search.check_time();
+    if search.timed_out {
+        return TIMEOUT_SCORE;
+    }
+    if !state.is_alive(our_id) {
+        return -MATE_SCORE + ply;
+    }
+    if state.alive_mask.count_ones() == 1 {
+        return MATE_SCORE - ply;
+    }
+    if depth <= 0 {
+        return eval_ffa(state, our_id, ply, scratch);
+    }
+    let (mut moves, move_count) = state.legal_moves(our_id);
+    if move_count == 0 {
+        return -MATE_SCORE + ply;
+    }
+    let player_count = state.player_count as usize;
+    let mut target_col = state.head_x[our_id] as i32;
+    let mut target_row = state.head_y[our_id] as i32;
+    for player in 0..player_count {
+        if player != our_id && state.is_alive(player) {
+            target_col = state.head_x[player] as i32;
+            target_row = state.head_y[player] as i32;
+            break;
+        }
+    }
+    order_moves(
+        state,
+        our_id,
+        &mut moves,
+        move_count,
+        NO_MOVE,
+        search.killers[ply as usize % 64][0],
+        NO_MOVE,
+        target_col,
+        target_row,
+    );
+    let mut best_score = -MATE_SCORE * 2;
+    for move_i in 0..move_count {
+        let mut after = *state;
+        after.apply(our_id, moves[move_i] as usize);
+        let score = paranoid_min(
+            &after,
+            our_id,
+            next_seat(our_id, player_count),
+            depth - 1,
+            ply + 1,
+            alpha,
+            beta,
+            search,
+            scratch,
+        );
+        if search.timed_out {
+            return TIMEOUT_SCORE;
+        }
+        if score > best_score {
+            best_score = score;
+        }
+        if score > alpha {
+            alpha = score;
+        }
+        if alpha >= beta {
+            let slot = ply as usize % 64;
+            if search.killers[slot][0] != moves[move_i] {
+                search.killers[slot][1] = search.killers[slot][0];
+                search.killers[slot][0] = moves[move_i];
+            }
+            break;
+        }
+    }
+    best_score
+}
+
+/// Min node: `to_move` is an opponent (or a dead seat we skip). The whole
+/// field colludes to **minimize** our [`eval_ffa`].
+///
+/// Seating order is preserved. When the walk returns to `our_id`, the round is
+/// over: leaf eval if `depth == 0`, else [`paranoid_max`].
+///
+/// **Where:** FFA root loop in [`choose_move`] after we apply a candidate, and
+/// from [`paranoid_max`] after each of our moves.
+/// **Why:** defensive FFA — assume every other bike tries to ruin our score,
+/// not to fill their own pocket.
+fn paranoid_min(
+    state: &State,
+    our_id: usize,
+    mut to_move: usize,
+    depth: i32,
+    ply: i32,
+    alpha: i32,
+    mut beta: i32,
+    search: &mut Search,
+    scratch: &mut Scratch,
+) -> i32 {
+    search.check_time();
+    if search.timed_out {
+        return TIMEOUT_SCORE;
+    }
+    let player_count = state.player_count as usize;
+    while to_move != our_id && !state.is_alive(to_move) {
+        to_move = next_seat(to_move, player_count);
+    }
+    if to_move == our_id {
+        return paranoid_max(state, our_id, depth, ply, alpha, beta, search, scratch);
+    }
+    if !state.is_alive(our_id) {
+        return -MATE_SCORE + ply;
+    }
+    if state.alive_mask.count_ones() == 1 {
+        return MATE_SCORE - ply;
+    }
+    let (mut moves, move_count) = state.legal_moves(to_move);
+    if move_count == 0 {
+        let mut after = *state;
+        after.kill(to_move);
+        return paranoid_min(
+            &after,
+            our_id,
+            next_seat(to_move, player_count),
+            depth,
+            ply + 1,
+            alpha,
+            beta,
+            search,
+            scratch,
+        );
+    }
+    // Coalition aims at our head.
+    order_moves(
+        state,
+        to_move,
+        &mut moves,
+        move_count,
+        NO_MOVE,
+        search.killers[ply as usize % 64][1],
+        NO_MOVE,
+        state.head_x[our_id] as i32,
+        state.head_y[our_id] as i32,
+    );
+    let mut best_score = MATE_SCORE * 2;
+    for move_i in 0..move_count {
+        let mut after = *state;
+        after.apply(to_move, moves[move_i] as usize);
+        let score = paranoid_min(
+            &after,
+            our_id,
+            next_seat(to_move, player_count),
+            depth,
+            ply + 1,
+            alpha,
+            beta,
+            search,
+            scratch,
+        );
+        if search.timed_out {
+            return TIMEOUT_SCORE;
+        }
+        if score < best_score {
+            best_score = score;
+        }
+        if score < beta {
+            beta = score;
+        }
+        if alpha >= beta {
+            break;
+        }
+    }
+    best_score
+}
+
 /// One-ply lookahead: try each of `player`’s legal moves, score the resulting
 /// position, and return the best direction.
 ///
 /// With one living opponent this uses [`eval_1v1`] (and an instant mate if they
 /// have no reply). With several it uses [`eval_ffa`]. Returns `None` if dead.
 ///
-/// **Where:** unused [`rollout_score`]. Production FFA uses [`search_ffa`]
-/// (greedy replies) instead of this as the opponent model.
+/// **Where:** unused [`rollout_score`]. FFA search currently uses paranoid
+/// minimax, not this 1-ply model.
 /// **Why:** a stronger “what would they do this turn?” than raw flood-greedy;
 /// kept for experiments.
 fn oneply_direction(state: &mut State, player: usize, scratch: &mut Scratch) -> Option<u8> {
@@ -1550,9 +1741,9 @@ fn rollout_score(
 /// - One legal move → play it immediately.
 /// - Nobody else alive → isolated [`fill_direction`].
 /// - 1v1 and the two chambers are cut off → 80-step greedy fill rollout.
-/// - 3+ living players → iterative-deepening [`search_ffa`] (we branch, others
-///   play [`greedy_direction`]). No 2-ply oneply warmup; ID starts from the
-///   first ordered move so search gets the full remaining budget.
+/// - 3+ living players → iterative-deepening paranoid minimax ([`paranoid_min`]
+///   after each of our moves). The field colludes to minimize [`eval_ffa`].
+///   No 2-ply warmup; ID starts from the first ordered move.
 /// - 1v1 still connected → iterative-deepening [`negamax_1v1`] up to depth 16
 ///   or the time budget. There is no 2-ply Voronoi warmup; ID starts from the
 ///   first ordered move so search gets the full remaining budget.
@@ -1659,8 +1850,9 @@ fn choose_move(
     let mut principal_dir = best_dir;
 
     if !is_duel {
-        // FFA: each ID ply is “our move, then greedy replies, then search_ffa”.
+        // FFA: each ID ply is our move, then a colluding Min round (paranoid).
         let max_ffa_depth = 8;
+        let player_count = state.player_count as usize;
         for depth in 1..=max_ffa_depth {
             if Instant::now() >= search.deadline {
                 break;
@@ -1682,14 +1874,17 @@ fn choose_move(
             for move_i in 0..move_count {
                 let mut after = *state;
                 after.apply(our_id, moves[move_i] as usize);
-                play_opponents_greedy(&mut after, our_id, scratch);
-                let score = if !after.is_alive(our_id) {
-                    -MATE_SCORE + 1
-                } else if after.alive_mask.count_ones() == 1 {
-                    MATE_SCORE - 1
-                } else {
-                    search_ffa(&after, our_id, depth - 1, 1, &mut search, scratch)
-                };
+                let score = paranoid_min(
+                    &after,
+                    our_id,
+                    next_seat(our_id, player_count),
+                    depth - 1,
+                    1,
+                    iter_best_score,
+                    MATE_SCORE * 2,
+                    &mut search,
+                    scratch,
+                );
                 if search.timed_out {
                     completed_iteration = false;
                     break;
