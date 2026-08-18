@@ -1031,6 +1031,19 @@ fn random_wall_state(rng: &mut XorShift, player_count: usize, walls: u32) -> Sta
             let _dir = choose_move(&mut state, 0, NO_MOVE, 15, &mut scratch);
             assert_same_state(&start, &state, &format!("choose-{i}"));
         }
+        for i in 0..10 {
+            let plies = rng.gen_range(16);
+            let start = random_play_state(&mut rng, 4, plies);
+            if start.alive_mask.count_ones() < 3 {
+                continue;
+            }
+            if start.legal_moves(0).1 < 2 {
+                continue;
+            }
+            let mut state = start;
+            let _dir = choose_move(&mut state, 0, NO_MOVE, 15, &mut scratch);
+            assert_same_state(&start, &state, &format!("choose-4p-{i}"));
+        }
     }
 
     #[test]

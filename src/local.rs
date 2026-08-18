@@ -342,6 +342,34 @@ fn profile() {
         DIR_NAME[dir as usize],
         choose_started.elapsed()
     );
+
+    let mut state4 = random_start(&mut rng, 4);
+    for _ in 0..8 {
+        for player in 0..4 {
+            if let Some(dir) = bot_greedy(&state4, player, &mut scratch) {
+                state4.apply(player, dir as usize);
+            }
+        }
+    }
+    let eval4_started = Instant::now();
+    let mut checksum4 = 0i32;
+    for _ in 0..eval_count {
+        checksum4 ^= eval_ffa(&state4, 0, 0);
+    }
+    let eval4_time = eval4_started.elapsed();
+    eprintln!(
+        "eval_ffa: {} in {:?} ({:.1}/ms) checksum {checksum4}",
+        eval_count,
+        eval4_time,
+        eval_count as f64 / eval4_time.as_secs_f64() / 1000.0
+    );
+    let choose4_started = Instant::now();
+    let dir4 = choose_move(&mut state4, 0, NO_MOVE, TURN_BUDGET_MS, &mut scratch);
+    eprintln!(
+        "choose_move 4p {} in {:?}",
+        DIR_NAME[dir4 as usize],
+        choose4_started.elapsed()
+    );
 }
 
 /// Handle `--bench` / `--profile`. Returns true if this process should exit.

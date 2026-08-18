@@ -2,7 +2,7 @@
 
 A Rust bot for [CodinGame Tron Battle](https://www.codingame.com/multiplayer/bot-programming/tron-battle). The **shipped agent is a single file** (`src/main.rs`, under the 100k-character IDE limit) so it can be pasted into the CodinGame IDE. Local bench, unit tests, SPRT, and the board watcher live beside it and are not part of the paste.
 
-The bot plays light-cycle Tron on a 30×20 grid. In 1v1 it uses iterative-deepening minimax with a **row-bitboard Voronoi** territory evaluation. Once the two bikes can no longer reach each other, it switches to a survival / space-filling policy. Matches with 3–4 players use iterative-deepening paranoid minimax: we maximize a survival eval, and every other living bike is assumed to collude to minimize it.
+The bot plays light-cycle Tron on a 30×20 grid. In 1v1 it uses iterative-deepening minimax with a **row-bitboard Voronoi** territory evaluation. Once the two bikes can no longer reach each other, it switches to a survival / space-filling policy. Matches with 3–4 players use iterative-deepening paranoid search: we maximize a survival eval, the closest rival is a true Min, and other bikes play one greedy space-keeping reply.
 
 ---
 
@@ -83,7 +83,7 @@ panic = "abort"
 
 1. Open Tron Battle, language **Rust**.
 2. Paste `src/main.rs` (not `local.rs` or the tests).
-3. Play a few IDE games. Stderr lines look like `DOWN mm 1840 75ms n=12345` (direction, last completed search score, milliseconds used, nodes). Open 1v1 and FFA both print that leftover score; isolated fill / endgame do not.
+3. Play a few IDE games. Stderr lines look like `DOWN mm 1840 75ms n=12345 d=11 a=2` (direction, last completed search score, milliseconds used, nodes, completed ID depth, living bikes). Open 1v1 and FFA both print that leftover score; isolated fill / endgame do not.
 4. If you timeout, lower `TURN_BUDGET_MS` / `FIRST_TURN_BUDGET_MS` at the top of the file.
 
 `--bench` and `--profile` live in `src/local.rs` (Cargo feature `local`, on by default). The CodinGame judge passes no argv and compiles only the pasted file, so they never run there. Engine-vs-engine testing is `tools/sprt.sh`. `cargo build --release --no-default-features` is a CodinGame-like binary (agent loop only).
@@ -172,11 +172,11 @@ tools/sprt.sh                   # default: H0=0 Elo, H1=+10 Elo, α=β=0.05, 20 
 
 ### Frozen baseline
 
-`bin/tron-baseline` is gitignored and matches this `src/main.rs`: bitboard Voronoi, mate scores from the side to move, checkerboard fill bound, 1v1 quiescence (up to 4 extra plies) and aspiration windows (`±16000`), iterative deepening cap 50, primed greedy fill **to completion** after a 1v1 cut, paranoid FFA with the original eval weights. Freeze it with `tools/save_baseline.sh` or `tools/save_baseline.cmd`. New patches SPRT against that file; Elo 0 means “as strong as this freeze.”
+`bin/tron-baseline` is gitignored and matches this `src/main.rs`: bitboard Voronoi, mate scores from the side to move, checkerboard fill bound, 1v1 quiescence (up to 4 extra plies) and aspiration windows (`±16000`), iterative deepening cap 50, primed greedy fill **to completion** after a 1v1 cut, mixed FFA (closest rival is Min; others play one greedy space-keeping reply). Freeze it with `tools/save_baseline.sh` or `tools/save_baseline.cmd`. New patches SPRT against that file; Elo 0 means “as strong as this freeze.”
 
 ### Earlier SPRTs (previous freezes)
 
-Against the pre-bitboard cell-BFS freeze, after scoring 1v1 terminals from the side to move (see [Evaluation poison](#evaluation-poison-we-had-to-remove)):
+Against the pre-bitboard cell-BFS freeze, after scoring 1v1 terminals from the side to move:
 
 | match | decision | n | score | Elo |
 |-------|----------|---|-------|-----|
@@ -188,6 +188,8 @@ The same 1v1 SPRT **before** the mate-sign fix accepted H0 at about **−35 Elo*
 Against the freeze that already had bitboard Voronoi, mate-sign, and paranoid FFA, checkerboard fill plus 1v1 quiescence and aspiration at **90 ms** accepted H1 (`n=1180`, 55.3%, **+36.6 ± 10.2**). At 20 ms those 1v1 patches were inconclusive. FFA eval did not change; 4p at 20 ms stayed a coin-flip.
 
 Against that freeze’s 80-step endgame cap, running primed greedy fill to completion at **90 ms** 1v1 accepted H1 (`n=8548`, 51.3%, **+9.3 ± 3.8**). NPS was unchanged (604k vs 604k); the gain is ranking large pockets correctly after a cut.
+
+Against the same freeze, mixed FFA search (closest rival is Min; other bikes play one greedy flood reply) at **20 ms** 4p accepted H1 (`n=1108`, 31.3% vs 25%, **+54.4 ± 11.3**, NPS 0.9×). Full-coalition Min was too scared; a single Min that hunted us (ordered toward our head) was ~0 Elo. Letting distant bikes keep their own space is the mixed model that converted extra depth into Elo.
 
 ### Hypotheses
 
@@ -265,8 +267,8 @@ Tracker          reconstructs occupancy from successive (tail, head) pairs
 choose_move
     ├─ 0 or 1 legal move → play it
     ├─ 3+ alive (FFA)
-    │     iterative-deepening paranoid minimax (cap 50 our-plies)
-    │     we maximize eval_ffa; every other living bike colludes to minimize it
+    │     iterative-deepening paranoid search (cap 50 our-plies)
+    │     closest rival is Min; others play one greedy space-keeping reply
     │     (no 2-ply warmup)
     ├─ 1v1, bikes still share space
     │     iterative-deepening alpha-beta from the first ordered move
@@ -279,7 +281,7 @@ choose_move
 stdout: UP|DOWN|LEFT|RIGHT
 ```
 
-`State` is `Copy` (~400 bytes). 1v1 search applies a move, recurses, then `undo_step`s. FFA paranoid search copies the state so Min can kill without undoing. There is no heap allocation on the hot path except a couple of tiny `Vec`s at the root of `choose_move`.
+`State` is `Copy` (~400 bytes). 1v1 and FFA search both apply a move, recurse, then `undo_step` (FFA `kill` is paired with `restore_killed`). There is no heap allocation on the hot path except a couple of tiny `Vec`s at the root of `choose_move`.
 
 Reusable fill/flood buffers live in `Scratch` (queue + visit stamps). Voronoi no longer uses those: it expands 20-row bitboards on the stack. The separated-rate counters (`CHOOSE_MOVE_COUNT` and friends) exist only with the `local` feature / `cargo test`; they are not in the CodinGame paste.
 
@@ -407,9 +409,6 @@ We simulate greedy fill **to completion** after each candidate (this path skips 
 ## Search (open 1v1)
 
 ### Iterative deepening + alpha-beta (negamax)
-
-There is no 2-ply Voronoi warmup in 1v1 (it was SPRT-neutral and ate budget). Iterative deepening starts from the first move in `order_moves` so search gets the full remaining time:
-
 ```text
 for depth = 1 ..= 50:
     search every root move with negamax(depth-1)
@@ -443,7 +442,7 @@ Killers: two slots per ply, updated on beta cutoffs.
 
 ### Time
 
-`Search` timestamps a deadline. Every 16 nodes it samples `Instant::now()`. On timeout, negamax returns a sentinel; every frame still undoes its move, so the real board is never left dirty. The incomplete depth is thrown away.
+`Search` timestamps a deadline. Every 64 nodes it samples `Instant::now()`. On timeout, negamax returns a sentinel; every frame still undoes its move, so the real board is never left dirty. The incomplete depth is thrown away.
 
 Budgets: 95 ms each turn (CodinGame limit 100 ms). SPRT passes `--budget-ms` / `TRON_BUDGET_MS` so both engines use a shorter fixed time.
 
@@ -451,9 +450,7 @@ Budgets: 95 ms each turn (CodinGame limit 100 ms). SPRT passes `--budget-ms` / `
 
 ## Free-for-all (3–4 players)
 
-Max-N on four players is too bushy for 75 ms. Do **not** run deep 1v1 minimax either: it treats extra bikes as frozen walls and suicides into fights.
-
-Instead FFA uses **paranoid minimax**. We maximize `eval_ffa`; every other living bike is a Min player that colludes to minimize that same score. Depth counts *our* plies. After each of our moves, Min walks seating order (skipping the dead) until it is our turn again. Scores stay in our POV (no negamax flip); alpha-beta prunes on that orientation. Iterative deepening starts from the first `order_moves` candidate, cap 50 (same as 1v1; time still throws away an incomplete ply), no 2-ply warmup.
+FFA uses **mixed paranoid search**. We maximize `eval_ffa`. The closest living rival (`main_opponent`) is a true Min; other living bikes play one greedy flood reply that keeps their own space. Depth counts *our* plies. After each of our moves, Min walks seating order (skipping the dead) until it is our turn again. Scores stay in our POV (no negamax flip); alpha-beta prunes on that orientation. Iterative deepening starts from the first `order_moves` candidate, cap 50 (same as 1v1; time still throws away an incomplete ply), no 2-ply warmup.
 
 `eval_ffa` prefers surviving with space:
 
@@ -468,26 +465,6 @@ When only two remain, the game becomes the 1v1 path (minimax + endgame fill). De
 `main_opponent` is the live enemy whose head we can reach soonest (BFS). FFA uses that head as the move-ordering target.
 
 Switching FFA from greedy-reply search to paranoid minimax (20 ms/turn, 1 candidate vs N−1 copies of that older search): **+94.5 ± 16.3 Elo** in 3p (46.3% vs 33.3%) and **+38.8 ± 10.0 Elo** in 4p (29.4% vs 25.0%). Numbers vs later freezes are in [Earlier SPRTs](#earlier-sprts-previous-freezes).
-
----
-
-## Evaluation poison we had to remove
-
-An early version added **`±12_000` whenever the two bikes were separated**, on top of the fill difference.
-
-That looks reasonable at a *root* position that is truly cut. Inside a deep search tree it is lethal: the opponent, according to the same eval, “cooperates” into a line where we are barely ahead after a fake cut (`51` vs `50` cells). The `12_000` spike outranks real territory. Minimax then plays to chase that hallucination and **loses to 1-ply Voronoi** (~12–40% in self-play).
-
-The fix: when separated, score only
-
-```text
-80 * sign(fill_diff) + 60 * fill_diff + 5 * hug_diff + mobility_diff
-```
-
-A real winning cut (200 vs 10) still dwarfs open-game scores. A 50–49 cut is a small edge, not a fake mate. After this change, the same minimax beat 1-ply Voronoi **~67–81%**.
-
-Blending 1-ply with deep scores, or capping depth at 1, did not fix it; the explosion in the leaf eval was the bug.
-
-A later bug had the same shape with **mate scores**. Quiet leaves were already from `to_move` (so the root can negate). Terminals (`0` legal moves, dead bike) were still from **our seat**. A line that trapped the opponent therefore came back as “we got mated.” Iterative deepening saw `|score| ≥ mate`, printed e.g. `RIGHT mm -999985`, and quit at ~34 ms on the statement opening. Gameplay still looked fine because the PV was often just the first ordered move. Fix: every mate return is from `to_move` as well (`-MATE` = side to move loses). After that, the same opening uses the full budget and reports a normal eval (`DOWN mm -18380` at 80 ms). Unifying the *leaf formula* (always Voronoi, never fill) made the depth-16 vs depth-8 match **worse**; do not re-apply that.
 
 ---
 
@@ -527,7 +504,7 @@ Representative results (25 ms, 12 games, noisy but directional):
 | voronoi-1ply | ~67–80% |
 | FFA vs mixed (greedy / wall / voronoi) | weak (~12% in 8 games; 25% is par) |
 
-`--profile` reports evals/ms (hundreds of evals per millisecond in release after the bitboard Voronoi) and one timed `choose_move`. Midgame 1v1 often reaches **depth 8–11** in the 75 ms box.
+`--profile` reports 1v1 and FFA evals/ms plus one timed `choose_move` for each. Midgame 1v1 often reaches **depth 14–15** in the 95 ms box; 4p mixed-Min typically completes depth 6.
 
 If both players are still alive after 900 rounds, the bench awards the larger flood fill (it used to default to player 0, which biased colour-swap stats).
 
@@ -536,10 +513,13 @@ If both players are still alive after 900 rounds, the bench awards the larger fl
 ## Implementation notes
 
 - **No reverse rule needed** — own trail blocks it.
-- **Apply / undo:** `occupy` sets occupied + trail + head; `undo_step` clears the *current* head cell and restores the previous head. Search only applies moves already known legal.
+- **Apply / undo:** `occupy` sets occupied + trail + head; `undo_step` clears the *current* head cell and restores the previous head. 1v1 and FFA search both apply/undo on one `State` (FFA `kill` is paired with `restore_killed`). Search only applies moves already known legal.
+- **Eval speed:** 1v1 leaves flood us once for the cut test and, with exactly two bikes alive, reuse that mask in the open-game Voronoi instead of a third independent flood. FFA eval skips `mask_edge_sum` (the FFA score does not use edges). AVX2/SSE2 row-expand was measured and lost: 20 `u32` rows with vertical neighbours is too small for a `#[target_feature]` call, and CodinGame is `rustc -O` (no Cargo LTO / `target-cpu=native`).
+- **FFA search:** the closest rival is a true Min; other bikes play one greedy flood reply (they keep their own space instead of hunting us).
+- **Move ordering:** killers plus a small per-player direction history table, bumped on beta cutoffs.
 - **Visit stamps** instead of `memset` on flood fills (`Scratch::next_generation`).
 - **Integer-only eval**, no transposition table. A Zobrist TT for *cutoffs* was tried and measured ~0 Elo (hits were almost all previous-iteration depth-misses; sequential Tron transposes rarely), so it was reverted. Caching depth-independent *properties* of a position (Voronoi, etc.) is a different idea — see [Ideas](#ideas-that-would-still-help). Four-wide branching plus alpha-beta is enough on a 600-cell board.
-- **Debug** goes to stderr (`eprintln!` + flush), which CodinGame shows in the IDE and ignores for scoring. After a completed search the line is `DIR mm SCORE Tms n=NODES`. Isolated fill / one-legal-move turns do not print it. SPRT parses `n=` / `Tms` for the NPS column.
+- **Debug** goes to stderr (`eprintln!` + flush), which CodinGame shows in the IDE and ignores for scoring. After a completed search the line is `DIR mm SCORE Tms n=NODES d=DEPTH a=ALIVE`. Isolated fill / one-legal-move turns do not print it. SPRT parses `n=` / `Tms` for the NPS column.
 
 ---
 
@@ -558,7 +538,7 @@ If both players are still alive after 900 rounds, the bench awards the larger fl
 ## Ideas that would still help
 
 1. **Articulation / chamber tree** for fillable space — Tarjan APs + a1k0n battlefront (drop rear rooms). Tried; on this empty 30×20 the cuts appear too late and open-game Tarjan wrecked NPS. Revisit if late-game trail geometry looks worth it.
-2. **Less-paranoid FFA** — Max-N or a mixed “they fill, they attack” model if the coalition assumption is too scared in 4p.
+2. **Max-N FFA** — if the mixed “closest hunts, others fill” model is still too scared or too optimistic, let every seat maximize its own `eval_ffa`.
 3. **Self-play tuning** of the open-game weights (`50 / 12 / 3 / 6 / 4`) against the voronoi-1ply baseline and against copies of itself.
 4. **Property cache, not cutoff TT.** A Zobrist table for alpha-beta cutoffs was ~0 Elo: sequential Tron almost never transposes at equal depth, so the hits were previous-iteration depth-misses. What *does* repeat, regardless of remaining depth, is the board itself — occupancy, heads, whose turn. Cache depth-independent facts for that key (Voronoi territory / edges / reach, `shares_space`, maybe `approx_fill`) so sibling lines and iterative-deepening re-searches skip the bitboard waves. Same paste-size and undo constraints as everything else.
 5. **Incremental Voronoi on make/unmake.** A step moves one head and walls one cell, but ownership is “strictly closest,” so both distance maps can change (paths through the new wall, flips far from the head). True reverse-delta BFS is messy; the robust undo is a stack snapshot of the maps. Voronoi only runs at leaves today, so updating on every interior `apply` can cost more than recomputing at the leaf. The interesting variant is parent→leaf: keep maps on the search stack and repair one ply at a leaf. On this 30×20 the current row-bitboard waves are already cheap, so measure against a full recompute before keeping it. `kill` (whole ribbon vanishes) is a rebuild anyway. Cousin of (4): a cache skips exact repeats; this tries to update when the board only moved one cell.
