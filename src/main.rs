@@ -59,8 +59,8 @@ const COL_MASK: u32 = (1 << 30) - 1;
 /// with an odd row it is `(col + row)` odd. Used by the checkerboard fill bound.
 const EVEN_COLS: u32 = 0x1555_5555;
 
-const TURN_BUDGET_MS: u64 = 75;
-const FIRST_TURN_BUDGET_MS: u64 = 85;
+const TURN_BUDGET_MS: u64 = 95;
+const FIRST_TURN_BUDGET_MS: u64 = 95;
 
 /// True if `(col, row)` is on the 30×20 board.
 ///
@@ -542,7 +542,7 @@ fn empty_degree(state: &State, col: i32, row: i32) -> i32 {
 /// Wall-hugging prefers cells with a high count (ride existing trails / edges).
 ///
 /// **Where:** move ordering, [`greedy_direction`], [`fill_direction`], isolated
-/// [`eval_1v1`], the 80-step endgame score in [`choose_move`], and `bot_wallhug`.
+/// [`eval_1v1`], the separated greedy rollout in [`choose_move`], and `bot_wallhug`.
 /// **Why:** riding a wall leaves more empty cells in front of you; a cheap
 /// heuristic that is correct often enough to use at every ply.
 fn wall_neighbor_count(state: &State, col: i32, row: i32) -> i32 {
@@ -1721,7 +1721,7 @@ fn paranoid_min(
 /// into a pocket and walled ourselves off from the rest), apply a heavy
 /// penalty. Returns `None` if there is no legal move.
 ///
-/// **Where:** [`choose_move`] when nobody else is alive, and inside the 80-step
+/// **Where:** [`choose_move`] when nobody else is alive, and inside the
 /// primed-greedy rollout when a 1v1 is cut off.
 /// **Why:** after a cut, minimax + Voronoi is the wrong game. This is a1k0n’s
 /// “take side pockets before the corridor” filler.
@@ -1771,7 +1771,8 @@ fn fill_direction(
 /// - No legal moves → dummy `0` (we crash next turn anyway).
 /// - One legal move → play it immediately.
 /// - Nobody else alive → isolated [`fill_direction`].
-/// - 1v1 and the two chambers are cut off → 80-step greedy fill rollout.
+/// - 1v1 and the two chambers are cut off → greedy fill to completion
+///   (this path skips minimax, so the turn budget is available).
 /// - 3+ living players → iterative-deepening paranoid minimax ([`paranoid_min`]
 ///   after each of our moves). The field colludes to minimize [`eval_ffa`].
 ///   No 2-ply warmup; ID starts from the first ordered move, cap 50.
@@ -1843,7 +1844,9 @@ fn choose_move(
         state, our_id, &mut moves, move_count, NO_MOVE, NO_MOVE, last_dir, target_col, target_row,
     );
 
-    // Isolated chamber: try each first step, then greedy-fill up to 80 cells.
+    // Isolated chamber: try each first step, then greedy-fill until death.
+    // Minimax does not run on this path, so use the turn budget; cap at
+    // board size only as a fuse if apply ever failed to occupy.
     if separated {
         let mut best_dir = moves[0];
         let mut best_score = i32::MIN;
@@ -1854,7 +1857,7 @@ fn choose_move(
             let mut simulated = *state;
             let mut extra = 0i32;
             let mut prev_dir = moves[move_i];
-            while extra < 80 {
+            while extra < BOARD_CELLS as i32 {
                 match fill_direction(&mut simulated, our_id, prev_dir, scratch) {
                     Some(dir) if simulated.is_legal_dir(our_id, dir as usize) => {
                         simulated.apply(our_id, dir as usize);
@@ -2140,8 +2143,8 @@ fn parse_budget_ms() -> Option<u64> {
 /// CodinGame stdin/stdout loop.
 ///
 /// Each turn: read `N my_id`, then N lines of `start_x start_y head_x head_y`,
-/// update [`Tracker`], print `UP|DOWN|LEFT|RIGHT`. First turn gets 85 ms,
-/// later turns 75 ms, unless [`parse_budget_ms`] overrides (SPRT).
+/// update [`Tracker`], print `UP|DOWN|LEFT|RIGHT`. Each turn gets 95 ms,
+/// unless [`parse_budget_ms`] overrides (SPRT).
 ///
 /// **Where:** [`main`] when there is no `--bench` / `--profile` flag (including
 /// the CodinGame judge, which passes no argv).

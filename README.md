@@ -16,7 +16,7 @@ You drive a light cycle. Each turn you output `UP`, `DOWN`, `LEFT`, or `RIGHT`. 
 - **Players:** 2 to 4. CodinGame’s statement lists `2 ≤ N ≤ 4`; some league text shows `N = 2` only. This bot supports both.
 - **Turns are sequential, not simultaneous.** Player 0 moves, then 1, then 2, … wrapping around live players. This is different from the 2010 Google AI Challenge (simultaneous Tron). Head-on “both enter the same cell” collisions do not happen; the player who moves second cannot occupy the cell the first player just took.
 - **Input does not send the full trail.** Each turn you get, per player, `(X0, Y0, X1, Y1)`: the *original* start (tail) and the *current* head. You must remember every head you have ever seen. When a player dies, all four values are `-1` and **their entire ribbon disappears**.
-- **Time:** under 100 ms per turn. This bot budgets **85 ms** on the first turn and **75 ms** after that, so there is margin for CodinGame’s slower judges.
+- **Time:** under 100 ms per turn. This bot budgets **95 ms**, so there is a little margin for CodinGame’s slower judges.
 - **Invalid / late / crashing output loses.**
 
 Example (2 players, we are player 0 at `(9,5)`, opponent at `(10,7)`):
@@ -172,7 +172,7 @@ tools/sprt.sh                   # default: H0=0 Elo, H1=+10 Elo, α=β=0.05, 20 
 
 ### Frozen baseline
 
-`bin/tron-baseline` is gitignored and matches this `src/main.rs`: bitboard Voronoi, mate scores from the side to move, checkerboard fill bound, 1v1 quiescence (up to 4 extra plies) and aspiration windows (`±16000`), iterative deepening cap 50, paranoid FFA with the original eval weights. Freeze it with `tools/save_baseline.sh` or `tools/save_baseline.cmd`. New patches SPRT against that file; Elo 0 means “as strong as this freeze.”
+`bin/tron-baseline` is gitignored and matches this `src/main.rs`: bitboard Voronoi, mate scores from the side to move, checkerboard fill bound, 1v1 quiescence (up to 4 extra plies) and aspiration windows (`±16000`), iterative deepening cap 50, primed greedy fill **to completion** after a 1v1 cut, paranoid FFA with the original eval weights. Freeze it with `tools/save_baseline.sh` or `tools/save_baseline.cmd`. New patches SPRT against that file; Elo 0 means “as strong as this freeze.”
 
 ### Earlier SPRTs (previous freezes)
 
@@ -186,6 +186,8 @@ Against the pre-bitboard cell-BFS freeze, after scoring 1v1 terminals from the s
 The same 1v1 SPRT **before** the mate-sign fix accepted H0 at about **−35 Elo**: extra depth was real, but a forced win was coming back as `-MATE`, so deeper search looked worse.
 
 Against the freeze that already had bitboard Voronoi, mate-sign, and paranoid FFA, checkerboard fill plus 1v1 quiescence and aspiration at **90 ms** accepted H1 (`n=1180`, 55.3%, **+36.6 ± 10.2**). At 20 ms those 1v1 patches were inconclusive. FFA eval did not change; 4p at 20 ms stayed a coin-flip.
+
+Against that freeze’s 80-step endgame cap, running primed greedy fill to completion at **90 ms** 1v1 accepted H1 (`n=8548`, 51.3%, **+9.3 ± 3.8**). NPS was unchanged (604k vs 604k); the gain is ranking large pockets correctly after a cut.
 
 ### Hypotheses
 
@@ -270,7 +272,7 @@ choose_move
     │     iterative-deepening alpha-beta from the first ordered move
     │     (no 2-ply Voronoi warmup)
     └─ 1v1, bikes cut off (endgame)
-          try each first move, then greedy-fill up to 80 steps
+          try each first move, then greedy-fill to completion
           pick the first move that survives longest
     │
     ▼
@@ -398,7 +400,7 @@ The last term is the important one: if you walk past a 1-cell pocket, raw `flood
 
 Finding a true longest path is NP-complete. a1k0n’s practical trick: **try each first move, then run the greedy filler to completion, pick the first move that “primes” the longest greedy life**.
 
-We simulate up to 80 greedy steps after each candidate. Score = `50 * extra_steps + wall_hug`. That is the move we play when `separated`.
+We simulate greedy fill **to completion** after each candidate (this path skips minimax, so the turn budget is available; a 600-cell fuse is only there if a step fails to occupy). Score = `50 * extra_steps + wall_hug`. That is the move we play when `separated`.
 
 ---
 
@@ -443,7 +445,7 @@ Killers: two slots per ply, updated on beta cutoffs.
 
 `Search` timestamps a deadline. Every 16 nodes it samples `Instant::now()`. On timeout, negamax returns a sentinel; every frame still undoes its move, so the real board is never left dirty. The incomplete depth is thrown away.
 
-Budgets: 85 ms first turn, 75 ms later (CodinGame limit 100 ms). SPRT passes `--budget-ms` / `TRON_BUDGET_MS` so both engines use a shorter fixed time.
+Budgets: 95 ms each turn (CodinGame limit 100 ms). SPRT passes `--budget-ms` / `TRON_BUDGET_MS` so both engines use a shorter fixed time.
 
 ---
 
