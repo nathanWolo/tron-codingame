@@ -172,7 +172,7 @@ tools/sprt.sh                   # default: H0=0 Elo, H1=+10 Elo, α=β=0.05, 20 
 
 ### Frozen baseline
 
-`bin/tron-baseline` is gitignored and matches this `src/main.rs`: bitboard Voronoi, mate scores from the side to move, checkerboard fill bound, 1v1 quiescence (up to 4 extra plies) and aspiration windows (`±16000`), iterative deepening cap 50, primed greedy fill **to completion** after a 1v1 cut, mixed FFA (closest rival is Min; others play one greedy space-keeping reply). Freeze it with `tools/save_baseline.sh` or `tools/save_baseline.cmd`. New patches SPRT against that file; Elo 0 means “as strong as this freeze.”
+`bin/tron-baseline` is gitignored and matches this `src/main.rs`: bitboard Voronoi, mate scores from the side to move, checkerboard fill bound, 1v1 quiescence (up to 4 extra plies) and aspiration windows (`±16000`), iterative deepening cap 50, primed greedy fill **to completion** after a 1v1 cut, mixed FFA (closest rival is Min; others play one greedy space-keeping reply), FFA opening center bias (same `(14,9)` pull as 1v1). Freeze it with `tools/save_baseline.sh` or `tools/save_baseline.cmd`. New patches SPRT against that file; Elo 0 means “as strong as this freeze.”
 
 ### Earlier SPRTs (previous freezes)
 
@@ -190,6 +190,8 @@ Against the freeze that already had bitboard Voronoi, mate-sign, and paranoid FF
 Against that freeze’s 80-step endgame cap, running primed greedy fill to completion at **90 ms** 1v1 accepted H1 (`n=8548`, 51.3%, **+9.3 ± 3.8**). NPS was unchanged (604k vs 604k); the gain is ranking large pockets correctly after a cut.
 
 Against the same freeze, mixed FFA search (closest rival is Min; other bikes play one greedy flood reply) at **20 ms** 4p accepted H1 (`n=1108`, 31.3% vs 25%, **+54.4 ± 11.3**, NPS 0.9×). Full-coalition Min was too scared; a single Min that hunted us (ordered toward our head) was ~0 Elo. Letting distant bikes keep their own space is the mixed model that converted extra depth into Elo.
+
+Against that mixed freeze, adding the 1v1 opening center bias to `eval_ffa` at **20 ms** 4p accepted H1 (`n=3448`, 27.2% vs 25%, **+19.9 ± 6.6**, NPS 1.0×). Search did not change; extra Min seats, FFA QS, and greedy-flood caps were ~0 or negative.
 
 ### Hypotheses
 
@@ -458,7 +460,10 @@ FFA uses **mixed paranoid search**. We maximize `eval_ffa`. The closest living r
 40 * our_reach + 25 * our_voronoi
 - 10 * best_enemy_voronoi - 4 * best_enemy_reach
 + 20 * our_mobility
++ center_weight * (-manhattan to (14,9))
 ```
+
+`center_weight` is `(500 - occupied).max(0) / 80`, the same opening pull as 1v1. It fades as the board fills.
 
 When only two remain, the game becomes the 1v1 path (minimax + endgame fill). Dead players’ trails are already gone, so the board opens up — that is unique to this CodinGame ruleset.
 

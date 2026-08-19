@@ -1298,7 +1298,8 @@ fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &m
 ///
 /// We are not trying to 1v1 a specific rival. Score our reachable / unique
 /// territory, subtract the strongest remaining opponent’s territory and reach,
-/// and add mobility so we do not get boxed in. Death / sole survivor use mate
+/// add mobility so we do not get boxed in, and (while the board is still
+/// empty) a 1v1-style pull toward (14, 9). Death / sole survivor use mate
 /// scores like [`eval_1v1`].
 ///
 /// **Where:** leaves of [`paranoid_max`].
@@ -1322,9 +1323,15 @@ fn eval_ffa(state: &State, our_id: usize, ply: i32) -> i32 {
         best_other_territory = best_other_territory.max(voronoi.territory[player]);
         best_other_reach = best_other_reach.max(voronoi.reachable[player]);
     }
+    let our_col = state.head_x[our_id] as i32;
+    let our_row = state.head_y[our_id] as i32;
+    let center_penalty = -((our_col - 14).abs() + (our_row - 9).abs());
+    let occupied_count = mask_popcount(&state.occupied.bits);
+    let center_weight = (500 - occupied_count).max(0) / 80;
     voronoi.reachable[our_id] * 40 + voronoi.territory[our_id] * 25 - best_other_territory * 10
         + -best_other_reach * 4
         + mobility(state, our_id) * 20
+        + center_penalty * center_weight
 }
 
 /// Clock and move-ordering state for one call to [`choose_move`].

@@ -241,9 +241,15 @@ fn eval_ffa_cell(state: &State, our_id: usize, ply: i32, slow: &Voronoi) -> i32 
         best_other_territory = best_other_territory.max(slow.territory[player]);
         best_other_reach = best_other_reach.max(slow.reachable[player]);
     }
+    let our_col = state.head_x[our_id] as i32;
+    let our_row = state.head_y[our_id] as i32;
+    let center_penalty = -((our_col - 14).abs() + (our_row - 9).abs());
+    let occupied_count = mask_popcount(&state.occupied.bits);
+    let center_weight = (500 - occupied_count).max(0) / 80;
     slow.reachable[our_id] * 40 + slow.territory[our_id] * 25 - best_other_territory * 10
         + -best_other_reach * 4
         + mobility(state, our_id) * 20
+        + center_penalty * center_weight
 }
 
 fn dump_board(state: &State) -> String {
