@@ -1297,10 +1297,10 @@ fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &m
 /// Free-for-all evaluation from `our_id`’s point of view.
 ///
 /// We are not trying to 1v1 a specific rival. Score our reachable / unique
-/// territory, subtract the strongest remaining opponent’s territory and reach,
-/// add mobility so we do not get boxed in, and (while the board is still
-/// empty) a 1v1-style pull toward (14, 9). Death / sole survivor use mate
-/// scores like [`eval_1v1`].
+/// territory, our unique-cell edge sum (open frontier), subtract the strongest
+/// remaining opponent’s territory and reach, add mobility so we do not get
+/// boxed in, and (while the board is still empty) a 1v1-style pull toward
+/// (14, 9). Death / sole survivor use mate scores like [`eval_1v1`].
 ///
 /// **Where:** leaves of [`paranoid_max`].
 /// **Why:** deep 1v1 minimax in a 3–4 player game treats others as frozen walls
@@ -1312,7 +1312,7 @@ fn eval_ffa(state: &State, our_id: usize, ply: i32) -> i32 {
     if state.alive_mask.count_ones() == 1 {
         return MATE_SCORE - ply;
     }
-    let voronoi = compute_voronoi_ex(state, false);
+    let voronoi = compute_voronoi_ex(state, true);
     let mut best_other_territory = 0;
     let mut best_other_reach = 0;
     let player_count = state.player_count as usize;
@@ -1330,6 +1330,7 @@ fn eval_ffa(state: &State, our_id: usize, ply: i32) -> i32 {
     let center_weight = (500 - occupied_count).max(0) / 80;
     voronoi.reachable[our_id] * 40 + voronoi.territory[our_id] * 25 - best_other_territory * 10
         + -best_other_reach * 4
+        + voronoi.edge_sum[our_id] * 12
         + mobility(state, our_id) * 20
         + center_penalty * center_weight
 }

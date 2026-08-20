@@ -248,6 +248,7 @@ fn eval_ffa_cell(state: &State, our_id: usize, ply: i32, slow: &Voronoi) -> i32 
     let center_weight = (500 - occupied_count).max(0) / 80;
     slow.reachable[our_id] * 40 + slow.territory[our_id] * 25 - best_other_territory * 10
         + -best_other_reach * 4
+        + slow.edge_sum[our_id] * 12
         + mobility(state, our_id) * 20
         + center_penalty * center_weight
 }
