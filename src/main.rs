@@ -1161,47 +1161,68 @@ fn wants_quiescence(
         && one_ply_creates_cut(state, our_id, opponent, to_move)
 }
 
-/// Unique-territory waves for two bikes. Same claim rule as [`compute_voronoi`]:
-/// a cell this wave that only one of them reaches is owned; a simultaneous
-/// touch is a tie. Used by [`eval_1v1`] so we can reuse the connectivity flood
-/// instead of running a third independent flood.
-fn voronoi_owned_2(
-    empty: &[u32; 20],
-    seed_a: [u32; 20],
-    seed_b: [u32; 20],
-) -> ([u32; 20], [u32; 20]) {
+/// Two independent BFS floods plus Voronoi ownership in one wave loop.
+///
+/// Both frontiers expand through every empty cell (so `reach_*` is the raw
+/// flood, same as [`flood_mask`]). A cell first touched this wave by exactly
+/// one bike — and never before by the other — is owned; a simultaneous first
+/// touch is a tie. Ownership matches [`compute_voronoi`]: if the other bike
+/// already reached a cell in an earlier wave they are strictly closer.
+/// `connected` is true if any empty cell is reachable by both.
+///
+/// **Where:** [`eval_1v1`]. One loop replaces two floods plus a claim loop.
+struct DuelVoronoi {
+    owned_a: [u32; 20],
+    owned_b: [u32; 20],
+    connected: bool,
+}
+
+fn duel_voronoi(empty: &[u32; 20], seed_a: [u32; 20], seed_b: [u32; 20]) -> DuelVoronoi {
+    // Claim-based waves: a frontier never re-enters a cell either bike has
+    // already claimed, so it dies out at the territory border. Two bikes are
+    // connected iff one wave ever touches a cell the other has claimed (or
+    // both touch a cell in the same wave).
     let mut front_a = seed_a;
     let mut front_b = seed_b;
     let mut owned_a = [0u32; 20];
     let mut owned_b = [0u32; 20];
-    let mut claimed = [0u32; 20];
+    let mut claimed_a = seed_a;
+    let mut claimed_b = seed_b;
+    let mut touch = 0u32;
+    for row in 0..20 {
+        let tie = seed_a[row] & seed_b[row];
+        touch |= tie;
+        owned_a[row] = seed_a[row] & !tie;
+        owned_b[row] = seed_b[row] & !tie;
+    }
     loop {
-        let mut any = false;
-        let mut union = [0u32; 20];
-        let mut multi = [0u32; 20];
+        let step_a = expand_mask(&front_a, empty);
+        let step_b = expand_mask(&front_b, empty);
+        let mut any = 0u32;
         for row in 0..20 {
-            let cells_a = front_a[row] & !claimed[row];
-            let cells_b = front_b[row] & !claimed[row];
-            front_a[row] = cells_a;
-            front_b[row] = cells_b;
-            multi[row] = cells_a & cells_b;
-            union[row] = cells_a | cells_b;
-            if union[row] != 0 {
-                any = true;
-            }
+            let hit_a = step_a[row] & !claimed_a[row];
+            let hit_b = step_b[row] & !claimed_b[row];
+            touch |= (hit_a & claimed_b[row]) | (hit_b & claimed_a[row]);
+            let new_a = hit_a & !claimed_b[row];
+            let new_b = hit_b & !claimed_a[row];
+            let tie = new_a & new_b;
+            owned_a[row] |= new_a & !tie;
+            owned_b[row] |= new_b & !tie;
+            claimed_a[row] |= new_a;
+            claimed_b[row] |= new_b;
+            front_a[row] = new_a;
+            front_b[row] = new_b;
+            any |= new_a | new_b;
         }
-        if !any {
+        if any == 0 {
             break;
         }
-        for row in 0..20 {
-            owned_a[row] |= front_a[row] & !multi[row];
-            owned_b[row] |= front_b[row] & !multi[row];
-            claimed[row] |= union[row];
-        }
-        front_a = expand_mask(&front_a, empty);
-        front_b = expand_mask(&front_b, empty);
     }
-    (owned_a, owned_b)
+    DuelVoronoi {
+        owned_a,
+        owned_b,
+        connected: touch != 0,
+    }
 }
 
 /// Static 1v1 evaluation from `our_id`’s point of view (positive = good for our player).
@@ -1242,8 +1263,17 @@ fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &m
     let empty = empty_rows(state);
     let our_seed = head_seed(state, our_id, &empty);
     let opp_seed = head_seed(state, opponent, &empty);
-    let our_flood = flood_mask(&our_seed, &empty);
-    if !adjacent && !masks_overlap(&our_flood, &opp_seed) {
+    // A third living bike still owns Voronoi cells; only the true duel can
+    // paint just this pair. Search 1v1 is always two alive.
+    let duel_only = state.alive_mask.count_ones() == 2;
+    let (connected, duel) = if duel_only {
+        let duel = duel_voronoi(&empty, our_seed, opp_seed);
+        (duel.connected, Some(duel))
+    } else {
+        let our_flood = flood_mask(&our_seed, &empty);
+        (masks_overlap(&our_flood, &opp_seed), None)
+    };
+    if !adjacent && !connected {
         let our_fill = approx_fill(state, our_id, scratch);
         let opp_fill = approx_fill(state, opponent, scratch);
         let fill_diff = our_fill - opp_fill;
@@ -1251,23 +1281,17 @@ fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &m
             - wall_neighbor_count(state, opp_col, opp_row);
         return fill_diff.signum() * 80 + fill_diff * 60 + hug * 5 + (our_mobility - opp_mobility);
     }
-    // A third living bike still owns Voronoi cells; only the true duel can
-    // paint just this pair. Search 1v1 is always two alive.
-    let voronoi = if state.alive_mask.count_ones() == 2 {
-        let opp_flood = flood_mask(&opp_seed, &empty);
-        let (owned_us, owned_opp) = voronoi_owned_2(&empty, our_seed, opp_seed);
+    let voronoi = if let Some(duel) = duel {
         let mut owned = [[0u32; 20]; MAX_PLAYERS];
         let mut territory = [0i32; MAX_PLAYERS];
         let mut edge_sum = [0i32; MAX_PLAYERS];
-        let mut reachable = [0i32; MAX_PLAYERS];
-        owned[our_id] = owned_us;
-        owned[opponent] = owned_opp;
-        territory[our_id] = mask_popcount(&owned_us);
-        territory[opponent] = mask_popcount(&owned_opp);
-        edge_sum[our_id] = mask_edge_sum(&owned_us, &empty);
-        edge_sum[opponent] = mask_edge_sum(&owned_opp, &empty);
-        reachable[our_id] = mask_popcount(&our_flood);
-        reachable[opponent] = mask_popcount(&opp_flood);
+        let reachable = [0i32; MAX_PLAYERS];
+        owned[our_id] = duel.owned_a;
+        owned[opponent] = duel.owned_b;
+        territory[our_id] = mask_popcount(&duel.owned_a);
+        territory[opponent] = mask_popcount(&duel.owned_b);
+        edge_sum[our_id] = mask_edge_sum(&duel.owned_a, &empty);
+        edge_sum[opponent] = mask_edge_sum(&duel.owned_b, &empty);
         Voronoi {
             territory,
             edge_sum,
@@ -1280,7 +1304,6 @@ fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &m
     };
     let territory = voronoi.territory[our_id] - voronoi.territory[opponent];
     let edges = voronoi.edge_sum[our_id] - voronoi.edge_sum[opponent];
-    let reach = voronoi.reachable[our_id] - voronoi.reachable[opponent];
     let mobility_diff = our_mobility - opp_mobility;
     let front = battlefront(&voronoi.owned[our_id], &voronoi.owned[opponent]);
     let center_penalty = -((our_col - 14).abs() + (our_row - 9).abs());
@@ -1288,7 +1311,6 @@ fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &m
     let center_weight = (500 - occupied_count).max(0) / 80;
     territory * 50
         + edges * 12
-        + reach * 3
         + mobility_diff * 6
         + front * 4
         + center_penalty * center_weight

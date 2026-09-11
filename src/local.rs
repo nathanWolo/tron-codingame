@@ -322,8 +322,39 @@ fn profile() {
             }
         }
     }
+    {
+        let empty = empty_rows(&state);
+        let sa = head_seed(&state, 0, &empty);
+        let sb = head_seed(&state, 1, &empty);
+        let n = 300000;
+        let t = Instant::now();
+        let mut acc = 0i32;
+        for i in 0..n {
+            let f = flood_mask(&std::hint::black_box(sa), &empty);
+            acc ^= f[i % 20] as i32;
+        }
+        eprintln!("flood_mask: {:.1}/ms {acc}", n as f64 / t.elapsed().as_secs_f64() / 1000.0);
+        let t = Instant::now();
+        for i in 0..n {
+            let d = duel_voronoi(&empty, std::hint::black_box(sa), sb);
+            acc ^= d.owned_a[i % 20] as i32;
+        }
+        eprintln!("duel_voronoi: {:.1}/ms {acc}", n as f64 / t.elapsed().as_secs_f64() / 1000.0);
+        let t = Instant::now();
+        for i in 0..n {
+            let v = compute_voronoi(std::hint::black_box(&state));
+            acc ^= v.owned[0][i % 20] as i32;
+        }
+        eprintln!("compute_voronoi: {:.1}/ms {acc}", n as f64 / t.elapsed().as_secs_f64() / 1000.0);
+        let t = Instant::now();
+        for i in 0..n {
+            let e = mask_edge_sum(&std::hint::black_box(sa), &empty);
+            acc ^= e + i as i32;
+        }
+        eprintln!("edge_sum: {:.1}/ms {acc}", n as f64 / t.elapsed().as_secs_f64() / 1000.0);
+    }
     let eval_started = Instant::now();
-    let eval_count = 2000;
+    let eval_count = 200000;
     let mut checksum = 0i32;
     for _ in 0..eval_count {
         checksum ^= eval_1v1(&state, 0, 1, 0, &mut scratch);
@@ -372,10 +403,85 @@ fn profile() {
     );
 }
 
+/// `--fill-eval`: read boards from stdin and print fill estimates.
+///
+/// Each board is 20 lines of 30 chars: `.` empty, `#` wall/trail, `A` head of
+/// player 0, `B` head of player 1. Prints per player:
+/// `flood approx_fill checkerboard greedy_steps`.
+fn fill_eval() {
+    use std::io::BufRead;
+    let stdin = std::io::stdin();
+    let mut lines = stdin.lock().lines();
+    let mut scratch = Scratch::new();
+    loop {
+        let mut state = State::new(2);
+        let mut rows = 0;
+        let mut heads = [(-1i32, -1i32); 2];
+        while rows < 20 {
+            let line = match lines.next() {
+                Some(Ok(text)) => text,
+                _ => return,
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            for (col, ch) in line.chars().take(30).enumerate() {
+                match ch {
+                    '#' => state.occupied.set(col as i32, rows as i32),
+                    'A' => heads[0] = (col as i32, rows as i32),
+                    'B' => heads[1] = (col as i32, rows as i32),
+                    _ => {}
+                }
+            }
+            rows += 1;
+        }
+        for player in 0..2 {
+            if heads[player].0 >= 0 {
+                state.occupy(player, heads[player].0, heads[player].1);
+            }
+        }
+        let mut out = Vec::new();
+        for player in 0..2 {
+            if !state.is_alive(player) {
+                out.push("0 0 0 0".to_string());
+                continue;
+            }
+            let fl = flood_count(&state, player, &mut scratch);
+            let af = approx_fill(&state, player, &mut scratch);
+            let cb = checkerboard_reach_bound(&state, player);
+            // Greedy rollout exactly like the separated root policy.
+            let mut best = 0;
+            let (moves, count) = state.legal_moves(player);
+            for i in 0..count {
+                let mut sim = state;
+                sim.apply(player, moves[i] as usize);
+                let mut extra = 1;
+                let mut prev = moves[i];
+                while extra < 600 {
+                    match fill_direction(&mut sim, player, prev, &mut scratch) {
+                        Some(dir) if sim.is_legal_dir(player, dir as usize) => {
+                            sim.apply(player, dir as usize);
+                            prev = dir;
+                            extra += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                best = best.max(extra);
+            }
+            out.push(format!("{fl} {af} {cb} {best}"));
+        }
+        println!("{}", out.join(" | "));
+    }
+}
+
 /// Handle `--bench` / `--profile`. Returns true if this process should exit.
 pub(crate) fn run() -> bool {
     if std::env::args().any(|arg| arg == "--bench") {
         bench();
+        true
+    } else if std::env::args().any(|arg| arg == "--fill-eval") {
+        fill_eval();
         true
     } else if std::env::args().any(|arg| arg == "--profile") {
         profile();

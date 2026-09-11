@@ -404,7 +404,6 @@ fn voronoi_gap(state: &State) -> Option<String> {
             let edges = slow.edge_sum[0] - slow.edge_sum[1];
             let our_mobility = mobility(state, 0);
             let opp_mobility = mobility(state, 1);
-            let reach = slow.reachable[0] - slow.reachable[1];
             let front = battlefront_cell(&slow.owned[0], &slow.owned[1]);
             let head_col = state.head_x[0] as i32;
             let head_row = state.head_y[0] as i32;
@@ -415,7 +414,6 @@ fn voronoi_gap(state: &State) -> Option<String> {
             let center_weight = (500 - occupied_count).max(0) / 80;
             territory * 50
                 + edges * 12
-                + reach * 3
                 + (our_mobility - opp_mobility) * 6
                 + front * 4
                 + center_penalty * center_weight
