@@ -522,7 +522,7 @@ fn fill_eval() {
             }
             for (col, ch) in line.chars().take(30).enumerate() {
                 match ch {
-                    '#' => state.occupied.set(col as i32, rows as i32),
+                    '#' => state.add_wall(col as i32, rows as i32),
                     'A' => heads[0] = (col as i32, rows as i32),
                     'B' => heads[1] = (col as i32, rows as i32),
                     _ => {}
@@ -606,7 +606,7 @@ fn eval_board() {
         }
         for (col, ch) in line.chars().take(30).enumerate() {
             match ch {
-                '#' => state.occupied.set(col as i32, rows as i32),
+                '#' => state.add_wall(col as i32, rows as i32),
                 'A' => heads[0] = (col as i32, rows as i32),
                 'B' => heads[1] = (col as i32, rows as i32),
                 _ => {}

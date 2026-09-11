@@ -138,6 +138,49 @@ impl RowBits {
     }
 }
 
+/// Zobrist keys: one per cell for occupancy, one per (player, cell) for the
+/// head position, and one per side to move. Generated at compile time with
+/// splitmix64 so the paste stays a single file with no tables to copy.
+const ZOBRIST_CELLS: usize = BOARD_CELLS * (MAX_PLAYERS + 1);
+const ZOBRIST: [u64; ZOBRIST_CELLS] = {
+    let mut keys = [0u64; ZOBRIST_CELLS];
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut i = 0;
+    while i < ZOBRIST_CELLS {
+        seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = seed;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        keys[i] = z ^ (z >> 31);
+        i += 1;
+    }
+    keys
+};
+
+#[inline]
+fn cell_key(col: i32, row: i32) -> u64 {
+    ZOBRIST[cell_index(col, row)]
+}
+
+#[inline]
+fn head_key(player: usize, col: i32, row: i32) -> u64 {
+    ZOBRIST[BOARD_CELLS * (player + 1) + cell_index(col, row)]
+}
+
+/// XOR of [`cell_key`] over every set bit in a trail mask (used by kill / restore).
+fn trail_hash(mask: &RowBits) -> u64 {
+    let mut hash = 0u64;
+    for row in 0..20 {
+        let mut bits = mask.bits[row];
+        while bits != 0 {
+            let col = bits.trailing_zeros() as i32;
+            bits &= bits - 1;
+            hash ^= cell_key(col, row as i32);
+        }
+    }
+    hash
+}
+
 /// Full game position: occupancy, per-player trails, heads, who is alive.
 ///
 /// This is the board [`Tracker`] maintains from CodinGame input and that
@@ -157,6 +200,8 @@ struct State {
     alive_mask: u8,
     /// How many player slots this match uses (2, 3, or 4), including dead ones.
     player_count: u8,
+    /// Zobrist hash of occupancy plus every living head position.
+    hash: u64,
 }
 
 impl State {
@@ -171,7 +216,20 @@ impl State {
             head_y: [-1; MAX_PLAYERS],
             alive_mask: 0,
             player_count,
+            hash: 0,
         }
+    }
+
+    /// Recompute the Zobrist hash from scratch (tests check the incremental one).
+    #[cfg(test)]
+    fn full_hash(&self) -> u64 {
+        let mut hash = trail_hash(&self.occupied);
+        for player in 0..self.player_count as usize {
+            if self.is_alive(player) {
+                hash ^= head_key(player, self.head_x[player] as i32, self.head_y[player] as i32);
+            }
+        }
+        hash
     }
 
     /// True if `player` still has a ribbon on the board.
@@ -187,9 +245,23 @@ impl State {
     fn occupy(&mut self, player: usize, col: i32, row: i32) {
         self.occupied.set(col, row);
         self.trail[player].set(col, row);
+        self.hash ^= cell_key(col, row) ^ head_key(player, col, row);
+        if self.head_x[player] >= 0 {
+            self.hash ^= head_key(player, self.head_x[player] as i32, self.head_y[player] as i32);
+        }
         self.head_x[player] = col as i8;
         self.head_y[player] = row as i8;
         self.alive_mask |= 1 << player;
+    }
+
+    /// Mark `(col, row)` as a wall that belongs to nobody (tests / local tools).
+    /// Keeps the Zobrist hash in step with `occupied`.
+    #[cfg(any(test, feature = "local"))]
+    fn add_wall(&mut self, col: i32, row: i32) {
+        if !self.occupied.is_set(col, row) {
+            self.occupied.set(col, row);
+            self.hash ^= cell_key(col, row);
+        }
     }
 
     /// CodinGame death: the whole ribbon disappears and those cells become empty.
@@ -201,6 +273,8 @@ impl State {
         }
         // Trails never overlap, so XOR removes exactly this player’s cells.
         self.occupied.xor_with(self.trail[player]);
+        self.hash ^= trail_hash(&self.trail[player])
+            ^ head_key(player, self.head_x[player] as i32, self.head_y[player] as i32);
         self.trail[player] = RowBits::empty();
         self.alive_mask &= !(1 << player);
         self.head_x[player] = -1;
@@ -254,6 +328,9 @@ impl State {
         let row = self.head_y[player] as i32;
         self.occupied.clear(col, row);
         self.trail[player].clear(col, row);
+        self.hash ^= cell_key(col, row)
+            ^ head_key(player, col, row)
+            ^ head_key(player, old_col as i32, old_row as i32);
         self.head_x[player] = old_col;
         self.head_y[player] = old_row;
     }
@@ -263,6 +340,7 @@ impl State {
     fn restore_killed(&mut self, player: usize, trail: RowBits, head_x: i8, head_y: i8) {
         self.trail[player] = trail;
         self.occupied.xor_with(trail);
+        self.hash ^= trail_hash(&trail) ^ head_key(player, head_x as i32, head_y as i32);
         self.head_x[player] = head_x;
         self.head_y[player] = head_y;
         self.alive_mask |= 1 << player;
@@ -279,7 +357,16 @@ struct Scratch {
     /// Generation stamp per cell; compared to `visit_generation` instead of clearing.
     visited_stamp: [u32; BOARD_CELLS],
     visit_generation: u32,
+    /// Cut cache: Zobrist key → `our_id`-POV fill score of a 1v1 position in
+    /// which the bikes are already separated. Once cut, the two chambers are
+    /// independent, so search treats such a node as terminal instead of
+    /// expanding a subtree whose every leaf would rerun `approx_fill` twice.
+    cut_keys: Vec<u64>,
+    cut_scores: Vec<i32>,
 }
+
+const CUT_CACHE_BITS: u32 = 15;
+const CUT_CACHE_SIZE: usize = 1 << CUT_CACHE_BITS;
 
 impl Scratch {
     /// Allocate one reusable buffer set. Call once per process / game loop
@@ -289,6 +376,8 @@ impl Scratch {
             bfs_queue: [0; BOARD_CELLS],
             visited_stamp: [0; BOARD_CELLS],
             visit_generation: 1,
+            cut_keys: vec![0; CUT_CACHE_SIZE],
+            cut_scores: vec![0; CUT_CACHE_SIZE],
         }
     }
 
@@ -937,6 +1026,153 @@ fn compute_voronoi_ex(state: &State, with_edges: bool) -> Voronoi {
     }
 }
 
+/// FFA leaf Voronoi: the same claim loop as [`compute_voronoi_ex`], but only
+/// one independent flood — our component. A rival whose empty head-neighbours
+/// all lie inside it shares exactly that component, so their `reachable` is
+/// our count; a rival touching a cell outside it is flooded separately. Same
+/// `territory` / `edge_sum` / `reachable` / `owned` as the general version;
+/// `still_connected` is not computed (always false).
+///
+/// **Where:** [`eval_ffa`]. **Why:** four independent floods were most of the
+/// FFA leaf cost, and in a shared component they all count the same cells.
+fn compute_voronoi_ffa(state: &State, our_id: usize) -> Voronoi {
+    compute_voronoi_ffa_ex(state, our_id, 0)
+}
+
+/// Rivals with this many reachable cells or fewer, sealed off from us, are
+/// treated as already gone: CodinGame erases a dead bike’s whole ribbon, so
+/// their trail is space the survivors next to it will inherit.
+const FFA_DOOM_CELLS: i32 = 40;
+
+/// [`compute_voronoi_ffa`] with `doomed` seats removed and their ribbons
+/// counted as empty (see [`FFA_DOOM_CELLS`]).
+fn compute_voronoi_ffa_ex(state: &State, our_id: usize, doomed: u8) -> Voronoi {
+    let mut empty = empty_rows(state);
+    let player_count = state.player_count as usize;
+    let alive = state.alive_mask & !doomed;
+    for player in 0..player_count {
+        if doomed & (1 << player) != 0 {
+            for row in 0..20 {
+                empty[row] |= state.trail[player].bits[row];
+            }
+        }
+    }
+    let is_alive = |player: usize| alive & (1 << player) != 0;
+
+    let mut seeds = [[0u32; 20]; MAX_PLAYERS];
+    let mut reachable = [0i32; MAX_PLAYERS];
+    for player in 0..player_count {
+        if is_alive(player) {
+            seeds[player] = head_seed(state, player, &empty);
+        }
+    }
+    // Flood one component from our first empty neighbour. If our other
+    // neighbours are not all inside it we touch several components; fall back
+    // to the general version (rare).
+    let mut first = [0u32; 20];
+    for row in 0..20 {
+        let bits = seeds[our_id][row];
+        if bits != 0 {
+            first[row] = bits & bits.wrapping_neg();
+            break;
+        }
+    }
+    let mut component = flood_mask(&first, &empty);
+    let mut multi_component = false;
+    for row in 0..20 {
+        if seeds[our_id][row] & !component[row] != 0 {
+            multi_component = true;
+        }
+    }
+    if multi_component {
+        // Our head touches several pockets: fall back to one flood per bike.
+        component = flood_mask(&seeds[our_id], &empty);
+    }
+    let our_reach = mask_popcount(&component);
+    reachable[our_id] = our_reach;
+    for player in 0..player_count {
+        if player == our_id || !is_alive(player) {
+            continue;
+        }
+        let mut inside = false;
+        let mut outside = false;
+        for row in 0..20 {
+            let bits = seeds[player][row];
+            inside |= bits & component[row] != 0;
+            outside |= bits & !component[row] != 0;
+        }
+        reachable[player] = if inside && !outside && !multi_component {
+            our_reach
+        } else if !inside && !outside {
+            0
+        } else {
+            mask_popcount(&flood_mask(&seeds[player], &empty))
+        };
+    }
+
+    let mut owned = [[0u32; 20]; MAX_PLAYERS];
+    let mut frontier = seeds;
+    let mut claimed = [0u32; 20];
+    loop {
+        let mut union = [0u32; 20];
+        let mut multi = [0u32; 20];
+        let mut any = false;
+        for player in 0..player_count {
+            if !is_alive(player) {
+                continue;
+            }
+            for row in 0..20 {
+                let cells = frontier[player][row] & !claimed[row];
+                frontier[player][row] = cells;
+                if cells != 0 {
+                    any = true;
+                }
+                multi[row] |= cells & union[row];
+                union[row] |= cells;
+            }
+        }
+        if !any {
+            break;
+        }
+        for player in 0..player_count {
+            if !is_alive(player) {
+                continue;
+            }
+            for row in 0..20 {
+                owned[player][row] |= frontier[player][row] & !multi[row];
+            }
+        }
+        for row in 0..20 {
+            claimed[row] |= union[row];
+        }
+        let mut next = [[0u32; 20]; MAX_PLAYERS];
+        for player in 0..player_count {
+            if !is_alive(player) {
+                continue;
+            }
+            next[player] = expand_mask(&frontier[player], &empty);
+        }
+        frontier = next;
+    }
+
+    let mut territory = [0i32; MAX_PLAYERS];
+    let mut edge_sum = [0i32; MAX_PLAYERS];
+    for player in 0..player_count {
+        if !is_alive(player) {
+            continue;
+        }
+        territory[player] = mask_popcount(&owned[player]);
+        edge_sum[player] = mask_edge_sum(&owned[player], &empty);
+    }
+    Voronoi {
+        territory,
+        edge_sum,
+        reachable,
+        still_connected: false,
+        owned,
+    }
+}
+
 /// How many of the four directions are legal for `player` (0–4).
 /// A mobility of 1 is a forced move; 0 is death next turn.
 ///
@@ -1279,7 +1515,14 @@ fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &m
         let fill_diff = our_fill - opp_fill;
         let hug = wall_neighbor_count(state, our_col, our_row)
             - wall_neighbor_count(state, opp_col, opp_row);
-        return fill_diff.signum() * 80 + fill_diff * 60 + hug * 5 + (our_mobility - opp_mobility);
+        let score =
+            fill_diff.signum() * 80 + fill_diff * 60 + hug * 5 + (our_mobility - opp_mobility);
+        // Remember this cut position so a later, deeper iteration can stop
+        // here instead of expanding two independent chambers.
+        let slot = (state.hash >> (64 - CUT_CACHE_BITS)) as usize;
+        scratch.cut_keys[slot] = state.hash;
+        scratch.cut_scores[slot] = score;
+        return score;
     }
     let voronoi = if let Some(duel) = duel {
         let mut owned = [[0u32; 20]; MAX_PLAYERS];
@@ -1334,12 +1577,27 @@ fn eval_ffa(state: &State, our_id: usize, ply: i32) -> i32 {
     if state.alive_mask.count_ones() == 1 {
         return MATE_SCORE - ply;
     }
-    let voronoi = compute_voronoi_ex(state, true);
+    let mut voronoi = compute_voronoi_ffa(state, our_id);
+    let player_count = state.player_count as usize;
+    // A rival sealed into a tiny pocket dies before we do and its ribbon
+    // vanishes: score the board as if that had already happened.
+    let mut doomed = 0u8;
+    for player in 0..player_count {
+        if player != our_id
+            && state.is_alive(player)
+            && voronoi.reachable[player] <= FFA_DOOM_CELLS
+            && voronoi.reachable[player] < voronoi.reachable[our_id]
+        {
+            doomed |= 1 << player;
+        }
+    }
+    if doomed != 0 {
+        voronoi = compute_voronoi_ffa_ex(state, our_id, doomed);
+    }
     let mut best_other_territory = 0;
     let mut best_other_reach = 0;
-    let player_count = state.player_count as usize;
     for player in 0..player_count {
-        if player == our_id || !state.is_alive(player) {
+        if player == our_id || !state.is_alive(player) || doomed & (1 << player) != 0 {
             continue;
         }
         best_other_territory = best_other_territory.max(voronoi.territory[player]);
@@ -1512,6 +1770,16 @@ fn negamax_1v1(
         return -MATE_SCORE + ply;
     }
 
+    // Already cut (seen as a leaf in an earlier iteration): the chambers are
+    // independent, so the fill comparison is the value. Terminal.
+    if depth > 0 {
+        let slot = (state.hash >> (64 - CUT_CACHE_BITS)) as usize;
+        if scratch.cut_keys[slot] == state.hash {
+            let score = scratch.cut_scores[slot];
+            return if to_move == our_id { score } else { -score };
+        }
+    }
+
     // Leaf: side to move with no reply loses. Tactical leaves (adjacent heads,
     // one escape, or a cut this ply) extend instead of static eval.
     if depth <= 0 {
@@ -1678,13 +1946,16 @@ fn greedy_space_dir(
     move_count: usize,
     scratch: &mut Scratch,
 ) -> u8 {
+    let _ = scratch;
     let mut best_dir = moves[0];
     let mut best = i32::MIN;
     for move_i in 0..move_count {
         let old_col = state.head_x[player];
         let old_row = state.head_y[player];
         state.apply(player, moves[move_i] as usize);
-        let space = flood_count(state, player, scratch);
+        // Same count as `flood_count`, on row bitboards instead of a cell BFS.
+        let empty = empty_rows(state);
+        let space = mask_popcount(&flood_mask(&head_seed(state, player, &empty), &empty));
         let hug = wall_neighbor_count(
             state,
             state.head_x[player] as i32,
@@ -2048,7 +2319,11 @@ fn choose_move(
         .map(|row| state.occupied.bits[row].count_ones())
         .sum();
     // Declare “cut off” only if both the BFS test and Voronoi agree we cannot
-    // meet. FFA is never treated as separated (we still need to fight).
+    // meet. FFA is never treated as separated: a rival’s death reopens the
+    // board, and the paranoid search (which sees rivals run out of moves and
+    // vanish inside its horizon) filled sealed chambers better than the
+    // primed rollout did, even with the rollout modelling those deaths
+    // (4p at 20 ms: −8 / +8 vs +11 Elo for plain search).
     let still_connected = !is_duel
         || shares_space(state, our_id, opponent)
         || compute_voronoi(state).still_connected;

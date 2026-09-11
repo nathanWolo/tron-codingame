@@ -231,11 +231,37 @@ fn eval_ffa_cell(state: &State, our_id: usize, ply: i32, slow: &Voronoi) -> i32 
     if state.alive_mask.count_ones() == 1 {
         return MATE_SCORE - ply;
     }
+    let player_count = state.player_count as usize;
+    // Doom projection: rivals sealed into a pocket of at most FFA_DOOM_CELLS
+    // (smaller than ours) are removed and their ribbons cleared, then the
+    // cell-BFS Voronoi is recomputed on that board.
+    let mut doomed = 0u8;
+    for player in 0..player_count {
+        if player != our_id
+            && state.is_alive(player)
+            && slow.reachable[player] <= FFA_DOOM_CELLS
+            && slow.reachable[player] < slow.reachable[our_id]
+        {
+            doomed |= 1 << player;
+        }
+    }
+    let projected;
+    let slow = if doomed != 0 {
+        let mut ghost = *state;
+        for player in 0..player_count {
+            if doomed & (1 << player) != 0 {
+                ghost.kill(player);
+            }
+        }
+        projected = compute_voronoi_cell(&ghost);
+        &projected
+    } else {
+        slow
+    };
     let mut best_other_territory = 0;
     let mut best_other_reach = 0;
-    let player_count = state.player_count as usize;
     for player in 0..player_count {
-        if player == our_id || !state.is_alive(player) {
+        if player == our_id || !state.is_alive(player) || doomed & (1 << player) != 0 {
             continue;
         }
         best_other_territory = best_other_territory.max(slow.territory[player]);
@@ -469,7 +495,7 @@ fn add_walls(state: &mut State, cells: &[(i32, i32)]) {
             }
         }
         if !on_head {
-            state.occupied.set(col, row);
+            state.add_wall(col, row);
         }
     }
 }
@@ -491,6 +517,8 @@ fn assert_same_state(before: &State, after: &State, label: &str) {
             "{label}: trail {player}"
         );
     }
+    assert_eq!(before.hash, after.hash, "{label}: hash");
+    assert_eq!(after.hash, after.full_hash(), "{label}: incremental hash");
 }
 
 fn bitboard_distances(state: &State, player: usize) -> [u16; BOARD_CELLS] {
@@ -643,6 +671,7 @@ fn random_play_state(rng: &mut XorShift, player_count: usize, plies: u32) -> Sta
             }
         }
     }
+    assert_eq!(state.hash, state.full_hash(), "random play: incremental hash");
     state
 }
 
@@ -657,7 +686,7 @@ fn random_wall_state(rng: &mut XorShift, player_count: usize, walls: u32) -> Sta
         if state.occupied.is_set(col, row) {
             continue;
         }
-        state.occupied.set(col, row);
+        state.add_wall(col, row);
         added += 1;
     }
     state
@@ -841,7 +870,7 @@ fn random_wall_state(rng: &mut XorShift, player_count: usize, walls: u32) -> Sta
                 if (col, row) == (0, 0) || state.occupied.is_set(col, row) {
                     continue;
                 }
-                state.occupied.set(col, row);
+                state.add_wall(col, row);
                 state.trail[0].set(col, row);
                 state.head_x[0] = col as i8;
                 state.head_y[0] = row as i8;
@@ -853,7 +882,7 @@ fn random_wall_state(rng: &mut XorShift, player_count: usize, walls: u32) -> Sta
                 if (col, row) == (29, 19) || state.occupied.is_set(col, row) {
                     continue;
                 }
-                state.occupied.set(col, row);
+                state.add_wall(col, row);
                 state.trail[1].set(col, row);
                 state.head_x[1] = col as i8;
                 state.head_y[1] = row as i8;
@@ -979,7 +1008,7 @@ fn random_wall_state(rng: &mut XorShift, player_count: usize, walls: u32) -> Sta
         occupy_player(&mut three, 2, 25, 10);
         occupy_player(&mut three, 1, 15, 0);
         for row in 1..20 {
-            three.occupied.set(15, row);
+            three.add_wall(15, row);
             three.trail[1].set(15, row);
             three.head_x[1] = 15;
             three.head_y[1] = row as i8;
@@ -1140,7 +1169,7 @@ fn random_wall_state(rng: &mut XorShift, player_count: usize, walls: u32) -> Sta
                 if skip || keep.iter().any(|&cell| cell == (col, row)) {
                     continue;
                 }
-                state.occupied.set(col, row);
+                state.add_wall(col, row);
             }
         }
     }
