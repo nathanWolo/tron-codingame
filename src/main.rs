@@ -59,6 +59,77 @@ const COL_MASK: u32 = (1 << 30) - 1;
 /// with an odd row it is `(col + row)` odd. Used by the checkerboard fill bound.
 const EVEN_COLS: u32 = 0x1555_5555;
 
+/// Tunable 1v1 eval weights; `TRON_PARAMS` (`name=value,...`) overrides for
+/// local tuning runs only.
+#[derive(Clone, Copy)]
+struct Params {
+    terr: i32,
+    edges: i32,
+    mob: i32,
+    front: i32,
+    center_div: i32,
+    /// Contested (equidistant) cells credited to the side that moves second,
+    /// in eval units per cell.
+    ties: i32,
+    // FFA eval weights.
+    f_reach: i32,
+    f_terr: i32,
+    f_oterr: i32,
+    f_oreach: i32,
+    f_edges: i32,
+    f_mob: i32,
+    doom: i32,
+}
+
+const DEFAULT_PARAMS: Params = Params {
+    terr: 50,
+    edges: 12,
+    mob: 6,
+    front: 4,
+    center_div: 80,
+    ties: 0,
+    f_reach: 40,
+    f_terr: 25,
+    f_oterr: 10,
+    f_oreach: 4,
+    f_edges: 12,
+    f_mob: 20,
+    doom: 40,
+};
+
+static PARAMS: std::sync::OnceLock<Params> = std::sync::OnceLock::new();
+
+#[inline]
+fn params() -> &'static Params {
+    PARAMS.get_or_init(|| {
+        let mut p = DEFAULT_PARAMS;
+        if let Ok(spec) = std::env::var("TRON_PARAMS") {
+            for item in spec.split(',') {
+                let mut kv = item.split('=');
+                let key = kv.next().unwrap_or("").trim();
+                let value: i32 = kv.next().and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+                match key {
+                    "terr" => p.terr = value,
+                    "edges" => p.edges = value,
+                    "mob" => p.mob = value,
+                    "front" => p.front = value,
+                    "center_div" => p.center_div = value,
+                    "ties" => p.ties = value,
+                    "f_reach" => p.f_reach = value,
+                    "f_terr" => p.f_terr = value,
+                    "f_oterr" => p.f_oterr = value,
+                    "f_oreach" => p.f_oreach = value,
+                    "f_edges" => p.f_edges = value,
+                    "f_mob" => p.f_mob = value,
+                    "doom" => p.doom = value,
+                    _ => {}
+                }
+            }
+        }
+        p
+    })
+}
+
 const TURN_BUDGET_MS: u64 = 95;
 const FIRST_TURN_BUDGET_MS: u64 = 95;
 
@@ -1039,13 +1110,10 @@ fn compute_voronoi_ffa(state: &State, our_id: usize) -> Voronoi {
     compute_voronoi_ffa_ex(state, our_id, 0)
 }
 
-/// Rivals with this many reachable cells or fewer, sealed off from us, are
-/// treated as already gone: CodinGame erases a dead bike’s whole ribbon, so
-/// their trail is space the survivors next to it will inherit.
-const FFA_DOOM_CELLS: i32 = 40;
-
 /// [`compute_voronoi_ffa`] with `doomed` seats removed and their ribbons
-/// counted as empty (see [`FFA_DOOM_CELLS`]).
+/// counted as empty (see `Params::doom`: rivals with that many reachable cells
+/// or fewer, sealed off from us, are treated as already gone — CodinGame erases
+/// a dead bike’s whole ribbon, so their trail is space the survivors inherit).
 fn compute_voronoi_ffa_ex(state: &State, our_id: usize, doomed: u8) -> Voronoi {
     let mut empty = empty_rows(state);
     let player_count = state.player_count as usize;
@@ -1411,6 +1479,8 @@ struct DuelVoronoi {
     owned_a: [u32; 20],
     owned_b: [u32; 20],
     connected: bool,
+    /// Cells both bikes reach in the same wave (contested).
+    ties: i32,
 }
 
 fn duel_voronoi(empty: &[u32; 20], seed_a: [u32; 20], seed_b: [u32; 20]) -> DuelVoronoi {
@@ -1454,10 +1524,15 @@ fn duel_voronoi(empty: &[u32; 20], seed_a: [u32; 20], seed_b: [u32; 20]) -> Duel
             break;
         }
     }
+    let mut ties = 0i32;
+    for row in 0..20 {
+        ties += (claimed_a[row] & claimed_b[row]).count_ones() as i32;
+    }
     DuelVoronoi {
         owned_a,
         owned_b,
         connected: touch != 0,
+        ties,
     }
 }
 
@@ -1482,7 +1557,14 @@ fn duel_voronoi(empty: &[u32; 20], seed_a: [u32; 20], seed_b: [u32; 20]) -> Duel
 /// do not reintroduce that. Switching to fill inside the tree is also a
 /// scale change; keep it only for positions that are already cut, not as a
 /// bonus for “looking cut.”
-fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &mut Scratch) -> i32 {
+fn eval_1v1(
+    state: &State,
+    our_id: usize,
+    opponent: usize,
+    to_move: usize,
+    ply: i32,
+    scratch: &mut Scratch,
+) -> i32 {
     if !state.is_alive(our_id) {
         return -MATE_SCORE + ply;
     }
@@ -1524,6 +1606,7 @@ fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &m
         scratch.cut_scores[slot] = score;
         return score;
     }
+    let ties = duel.as_ref().map_or(0, |d| d.ties);
     let voronoi = if let Some(duel) = duel {
         let mut owned = [[0u32; 20]; MAX_PLAYERS];
         let mut territory = [0i32; MAX_PLAYERS];
@@ -1551,12 +1634,21 @@ fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &m
     let front = battlefront(&voronoi.owned[our_id], &voronoi.owned[opponent]);
     let center_penalty = -((our_col - 14).abs() + (our_row - 9).abs());
     let occupied_count = mask_popcount(&state.occupied.bits);
-    let center_weight = (500 - occupied_count).max(0) / 80;
-    territory * 50
-        + edges * 12
-        + mobility_diff * 6
-        + front * 4
+    let p = params();
+    let center_weight = if p.center_div > 0 {
+        (500 - occupied_count).max(0) / p.center_div
+    } else {
+        0
+    };
+    // Contested cells favour the bike that moves second (it can answer the
+    // first mover's commitment), so credit them against the side to move.
+    let tie_score = if to_move == our_id { -ties } else { ties } * p.ties;
+    territory * p.terr
+        + edges * p.edges
+        + mobility_diff * p.mob
+        + front * p.front
         + center_penalty * center_weight
+        + tie_score
 }
 
 /// Free-for-all evaluation from `our_id`’s point of view.
@@ -1585,7 +1677,7 @@ fn eval_ffa(state: &State, our_id: usize, ply: i32) -> i32 {
     for player in 0..player_count {
         if player != our_id
             && state.is_alive(player)
-            && voronoi.reachable[player] <= FFA_DOOM_CELLS
+            && voronoi.reachable[player] <= params().doom
             && voronoi.reachable[player] < voronoi.reachable[our_id]
         {
             doomed |= 1 << player;
@@ -1608,10 +1700,12 @@ fn eval_ffa(state: &State, our_id: usize, ply: i32) -> i32 {
     let center_penalty = -((our_col - 14).abs() + (our_row - 9).abs());
     let occupied_count = mask_popcount(&state.occupied.bits);
     let center_weight = (500 - occupied_count).max(0) / 80;
-    voronoi.reachable[our_id] * 40 + voronoi.territory[our_id] * 25 - best_other_territory * 10
-        + -best_other_reach * 4
-        + voronoi.edge_sum[our_id] * 12
-        + mobility(state, our_id) * 20
+    let p = params();
+    voronoi.reachable[our_id] * p.f_reach + voronoi.territory[our_id] * p.f_terr
+        - best_other_territory * p.f_oterr
+        - best_other_reach * p.f_oreach
+        + voronoi.edge_sum[our_id] * p.f_edges
+        + mobility(state, our_id) * p.f_mob
         + center_penalty * center_weight
 }
 
@@ -1784,7 +1878,7 @@ fn negamax_1v1(
     // one escape, or a cut this ply) extend instead of static eval.
     if depth <= 0 {
         if !wants_quiescence(state, our_id, opponent, qs_left, to_move, move_count) {
-            let score = eval_1v1(state, our_id, opponent, ply, scratch);
+            let score = eval_1v1(state, our_id, opponent, to_move, ply, scratch);
             return if to_move == our_id { score } else { -score };
         }
         depth = 1;

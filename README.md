@@ -214,8 +214,9 @@ Things that did **not** help at 20 ms 1v1 in this round (fixed 1200–1600-game 
 | extend leaves with a short battlefront | +2 (≤2) / −9 (≤4) |
 | late-move reduction of the third move | −6 (depth ≥3) / +7 (depth ≥6) |
 | only trust even-depth iterations | 0 |
+| cut cache: Zobrist key of an already-separated position → its fill score, so a deeper iteration treats it as terminal | +1 ± 8, NPS 1.1× (kept; cut subtrees were not the cost they looked like in the profile) |
 
-Calibration: the same engine with **2× time** (40 ms vs 20 ms) scores +16 ± 14 (600 games), so at this time control one extra doubling of speed is worth about 15–20 Elo, and ~88% of seat-rotated pairs are decided by the seeded opening rather than by play.
+Calibration: the same engine with **2× time** (40 ms vs 20 ms) scores +16 ± 14 (600 games) and with **4× time** (80 ms) +18.5 ± 14, so at this time control a doubling of speed is worth about 15–20 Elo and the curve flattens fast. The reason is the opening: ~88–90% of seat-rotated pairs split 1–1 whichever engine is stronger (the 4× engine swept 23 pairs and was swept in 7, out of 300), because four random seed plies per side usually leave one seat 50+ Voronoi cells behind. Elo gains here come only from the ~10% of openings that are still balanced, which caps what any patch can show: reaching +50 (57%) would need the candidate to sweep almost every one of those pairs. In 4p the same doubling is worth about +20 ± 14 (800 games, 1 vs 3).
 
 ### Hypotheses
 
@@ -490,6 +491,12 @@ FFA uses **mixed paranoid search**. We maximize `eval_ffa`. The closest living r
 
 `center_weight` is `(500 - occupied).max(0) / 80`, the same opening pull as 1v1. It fades as the board fills.
 
+**Doom projection.** CodinGame erases a dead bike’s whole ribbon, and in 4p that is what decides most games: in 55% of 4p self-play games all four bikes end up sealed in their own chambers while everyone is still alive, and in those games the biggest chamber wins only 47% of the time — the space freed when the smallest chamber’s owner dies is what gets re-divided. So `eval_ffa` treats a rival sealed off from us with at most `FFA_DOOM_CELLS` (40) reachable cells, and fewer than ours, as already gone: its ribbon counts as empty and the Voronoi is recomputed on that board (`compute_voronoi_ffa_ex`). Threshold 20 and 40 were both about +11 Elo in 4p at 20 ms (1600 games, paired seeds); projecting *every* smaller sealed rival (threshold 600) was −138, so keep it to bikes that die within the search’s reach.
+
+`compute_voronoi_ffa` floods only our own component: a rival whose empty head-neighbours all lie inside it has exactly the same `reachable`, one touching a cell outside is flooded separately, one touching none has 0. Same claim loop as `compute_voronoi_ex`; the FFA leaf is ~1.7× faster and the greedy space-keeping reply uses row-bitboard floods instead of a cell BFS.
+
+Two things that did **not** help in 4p (same 1600-game paired setup, vs +11 for plain doom-40): switching to the primed greedy fill when no rival shares our component (−8; with the rollout killing doomed rivals at their fill length, +8), and dropping the Min player when nobody can reach us (+9). The paranoid search already sees rivals run out of moves and vanish inside its horizon.
+
 When only two remain, the game becomes the 1v1 path (minimax + endgame fill). Dead players’ trails are already gone, so the board opens up — that is unique to this CodinGame ruleset.
 
 `main_opponent` is the live enemy whose head we can reach soonest (BFS). FFA uses that head as the move-ordering target.
@@ -542,6 +549,8 @@ Two more local modes read a board from stdin (20 lines of 30 chars: `.` empty, `
 - `--eval-board` prints the static eval and each of A’s root moves scored at depths 1..=14.
 
 `tools/sprt.py` now logs every move (with the engine’s `mm` score and depth) per game, and three scripts read those logs: `tools/analyze_games.py LOG…` (when games separate, flood sizes at the cut, fill efficiency), `tools/show_game.py LOG IDX [PLY|sep|end]` (ASCII board with Voronoi tint), `tools/replay_ask.py ENGINE LOG IDX PLY` (replay to a ply and ask an engine what it would play), `tools/fill_accuracy.py ENGINE LOG…` (estimate vs. actual steps at the cut).
+
+`tools/features.py OUT.npz LOG…` featurises positions from logged 1v1 games (Voronoi territory / edges / mobility / battlefront / center plus contested cells, near/far territory, dead-end teeth, checkerboard surplus, corridors, wall-adjacent cells) from player 0’s seat at fixed plies, labelled by the winner; `tools/fit.py OUT.npz` fits logistic models (numpy only) and compares feature sets. On 132k positions from 28.7k games: territory alone predicts the winner 86.0%; the current five features refit 87.2%; adding the count of contested cells 88.9% (they favour the bike that moves *second*, ≈0.14 territory cells each — the mirror image of the “ties to the mover” patch, which lost Elo). Plugging those weights back into the engine did not move Elo (`ties=7`: +5 ± 9), so treat the fit as a description of how this engine’s games go, not as a better eval.
 
 What those tools showed on self-play at 20 ms: 98% of games end by separation; at the cut the flood margin is usually >20 cells; the loser then fills its chamber optimally in 86% of solvable cases (mean shortfall ≈0.2 cells), so the endgame is not where Elo is; plain Voronoi 40 plies before the cut already predicts 85% of winners. Midgame 1v1 often reaches **depth 14–15** in the 95 ms box; 4p mixed-Min typically completes depth 6.
 

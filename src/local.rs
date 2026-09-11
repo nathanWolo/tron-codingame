@@ -139,7 +139,7 @@ fn bot_voronoi1(state: &mut State, player: usize, scratch: &mut Scratch) -> Opti
         let old_col = state.head_x[player];
         let old_row = state.head_y[player];
         state.apply(player, legal[move_i] as usize);
-        let score = eval_1v1(state, player, opponent, 1, scratch);
+        let score = eval_1v1(state, player, opponent, opponent, 1, scratch);
         state.undo_step(player, old_col, old_row);
         if score > best_score {
             best_score = score;
@@ -369,7 +369,7 @@ fn profile() {
     let eval_count = 200000;
     let mut checksum = 0i32;
     for _ in 0..eval_count {
-        checksum ^= eval_1v1(&state, 0, 1, 0, &mut scratch);
+        checksum ^= eval_1v1(&state, 0, 1, 0, 0, &mut scratch);
     }
     let eval_time = eval_started.elapsed();
     eprintln!(
@@ -620,7 +620,7 @@ fn eval_board() {
     let (moves, move_count) = state.legal_moves(0);
     eprintln!(
         "static eval (A to move): {}",
-        eval_1v1(&state, 0, 1, 0, &mut scratch)
+        eval_1v1(&state, 0, 1, 0, 0, &mut scratch)
     );
     for i in 0..move_count {
         let mut line = format!("{:5}", DIR_NAME[moves[i] as usize]);
