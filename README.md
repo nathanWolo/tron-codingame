@@ -172,7 +172,7 @@ tools/sprt.sh                   # default: H0=0 Elo, H1=+10 Elo, α=β=0.05, 20 
 
 ### Frozen baseline
 
-`bin/tron-baseline` is gitignored and matches this `src/main.rs`: bitboard Voronoi, mate scores from the side to move, checkerboard fill bound, 1v1 quiescence (up to 4 extra plies) and aspiration windows (`±16000`), iterative deepening cap 50, primed greedy fill **to completion** after a 1v1 cut, mixed FFA (closest rival is Min; others play one greedy space-keeping reply), FFA opening center bias (same `(14,9)` pull as 1v1). Freeze it with `tools/save_baseline.sh` or `tools/save_baseline.cmd`. New patches SPRT against that file; Elo 0 means “as strong as this freeze.”
+`bin/tron-baseline` is gitignored and matches this `src/main.rs`: fused claim-based duel Voronoi (no reach term), mate scores from the side to move, checkerboard fill bound, 1v1 quiescence (up to 4 extra plies) and aspiration windows (`±16000`), iterative deepening cap 50, primed greedy fill **to completion** after a 1v1 cut, mixed FFA (closest rival is Min; others play one greedy space-keeping reply), FFA opening center bias (same `(14,9)` pull as 1v1). Freeze it with `tools/save_baseline.sh` or `tools/save_baseline.cmd`. New patches SPRT against that file; Elo 0 means “as strong as this freeze.”
 
 ### Earlier SPRTs (previous freezes)
 
@@ -192,6 +192,30 @@ Against that freeze’s 80-step endgame cap, running primed greedy fill to compl
 Against the same freeze, mixed FFA search (closest rival is Min; other bikes play one greedy flood reply) at **20 ms** 4p accepted H1 (`n=1108`, 31.3% vs 25%, **+54.4 ± 11.3**, NPS 0.9×). Full-coalition Min was too scared; a single Min that hunted us (ordered toward our head) was ~0 Elo. Letting distant bikes keep their own space is the mixed model that converted extra depth into Elo.
 
 Against that mixed freeze, adding the 1v1 opening center bias to `eval_ffa` at **20 ms** 4p accepted H1 (`n=3448`, 27.2% vs 25%, **+19.9 ± 6.6**, NPS 1.0×). Search did not change; extra Min seats, FFA QS, and greedy-flood caps were ~0 or negative.
+
+Against the freeze before the fused duel Voronoi (two independent floods + claim loop, with the `reach*3` term), the single claim-based wave loop at **20 ms** 1v1 accepted H1 (`n=7474`, 51.4%, **+9.8 ± 4.0**, NPS 1.5×). Eval is ~1.8× faster (≈0.5 µs on an open board).
+
+Things that did **not** help at 20 ms 1v1 in this round (fixed 1200–1600-game screens unless noted; the reported ± is 1σ and, because 88% of seat-rotated pairs split 1–1, the true σ is roughly half that):
+
+| change | result |
+|--------|--------|
+| Voronoi ties to the side to move | SPRT accepted H0, −6.5 ± 6.3 |
+| cut-leaf tempo (equal space: side to move dies first, half-cell units) | fused + tempo vs old freeze was inconclusive at 10 000 games, +7.6 ± 3.5, i.e. no gain over fused alone |
+| use a partial ID iteration when a later root move beat the PV | SPRT accepted H0, −0.9 ± 4.4 |
+| Zobrist TT for move ordering + cutoffs | −12% nodes at fixed depth; not worth the paste (EBF is already ≈1.65 ≈ √3) |
+| `edges` 12→6 / 12→20, `mobility` 6→15, `front` 4→0 / 4→12, center pull ×2 / off, aspiration ±4000 | all within ±10 |
+| QS off | −15 (QS 8 instead of 4: 0) |
+| cut-leaf scale ×100 instead of ×60 | +2 |
+| checkerboard cap on Voronoi territory | +3 |
+| dead-end “teeth” peeling penalty on territory | +3 |
+| distance-discounted territory (far cells count less) | −19 |
+| soft Voronoi border (margin-1 cells count half) | −10 |
+| cheap cut leaf (checkerboard-capped flood instead of `approx_fill`) | −3 |
+| extend leaves with a short battlefront | +2 (≤2) / −9 (≤4) |
+| late-move reduction of the third move | −6 (depth ≥3) / +7 (depth ≥6) |
+| only trust even-depth iterations | 0 |
+
+Calibration: the same engine with **2× time** (40 ms vs 20 ms) scores +16 ± 14 (600 games), so at this time control one extra doubling of speed is worth about 15–20 Elo, and ~88% of seat-rotated pairs are decided by the seeded opening rather than by play.
 
 ### Hypotheses
 
@@ -338,7 +362,9 @@ The design follows the 2010 Google AI Challenge Tron literature (especially a1k0
 
 ### 1. Voronoi territory
 
-Empty cells are partitioned by who can reach them first. Distances are **row-bitboard waves**: each living head’s empty neighbours are a 30-bit seed, then every orthogonal step is a shift/OR across the 20 occupancy rows. A cell reached by exactly one bike that wave is that bike’s territory; a cell reached by two or more is a tie (unowned). Reachability is a separate independent flood — opponent-owned empty cells are still walkable, matching the old per-player BFS.
+Empty cells are partitioned by who can reach them first. Distances are **row-bitboard waves**: each living head’s empty neighbours are a 30-bit seed, then every orthogonal step is a shift/OR across the 20 occupancy rows. A cell reached by exactly one bike that wave is that bike’s territory; a cell reached by two or more is a tie (unowned).
+
+The 1v1 leaf (`duel_voronoi`) runs both bikes’ waves in **one claim-based loop**: a frontier never re-enters a cell either bike has already claimed, so it dies out at the territory border, and the two bikes are connected iff one wave ever touches a cell the other claimed (or both touch a cell in the same wave). That single loop replaced two independent floods plus a claim loop, and the leaf no longer needs a separate reachability flood. `compute_voronoi` (FFA, root checks, tests) still uses independent floods for `reachable` / `still_connected`.
 
 The head cell itself is occupied, so search starts from its empty 4-neighbours at distance 1.
 
@@ -346,7 +372,7 @@ A cell belongs to a player if they are **strictly closest**. Ties are contested 
 
 - **territory** — cells owned
 - **edges** — sum of empty 4-neighbours of owned cells (a1k0n: leftover open edges in your region; occupying a wall-adjacent cell leaves more edges, which induces wall-hugging when scores are close)
-- **reach** — empty cells you can reach at all, even if the opponent is closer
+- **reach** — empty cells you can reach at all, even if the opponent is closer (FFA eval only)
 - **still_connected** — true if any empty cell is reachable by two or more players
 - **battlefront** — owned cells adjacent to opponent-owned cells
 
@@ -355,13 +381,12 @@ Open-game evaluation (1v1, still interacting):
 ```text
 score = 50*(my_terr - opp_terr)
       + 12*(my_edges - opp_edges)
-      +  3*(my_reach - opp_reach)
       +  6*(my_mobility - opp_mobility)
       +  4*battlefront
       + center_weight * (-manhattan to (14,9))
 ```
 
-`my_terr` is unique Voronoi cells. `my_reach` is the raw flood (including ties).
+`my_terr` is unique Voronoi cells. The old `3*(my_reach - opp_reach)` term was dropped: while the bikes share a component both reach the same cells, so it was almost always zero (nonzero only for a pocket touching exactly one head, which is already counted as territory). Dropping it is what lets the leaf skip the independent floods.
 
 Center preference fades as the board fills (`center_weight = (500 - occupied) / 80`).
 
@@ -509,7 +534,16 @@ Representative results (25 ms, 12 games, noisy but directional):
 | voronoi-1ply | ~67–80% |
 | FFA vs mixed (greedy / wall / voronoi) | weak (~12% in 8 games; 25% is par) |
 
-`--profile` reports 1v1 and FFA evals/ms plus one timed `choose_move` for each. Midgame 1v1 often reaches **depth 14–15** in the 95 ms box; 4p mixed-Min typically completes depth 6.
+`--profile` reports 1v1 and FFA evals/ms (200k calls, after a warm-up — short timing loops on a cold core were off by 3×), microbenchmarks of `flood_mask` / `duel_voronoi` / `compute_voronoi`, a fixed-depth node table (ordering quality), plus one timed `choose_move` for each.
+
+Two more local modes read a board from stdin (20 lines of 30 chars: `.` empty, `#` wall or trail, `A` / `B` heads):
+
+- `--fill-eval` prints per player `flood approx_fill checkerboard greedy_steps exact` for every board on stdin (`exact` is a bounded longest-path DFS; `~N` if it hit the node limit).
+- `--eval-board` prints the static eval and each of A’s root moves scored at depths 1..=14.
+
+`tools/sprt.py` now logs every move (with the engine’s `mm` score and depth) per game, and three scripts read those logs: `tools/analyze_games.py LOG…` (when games separate, flood sizes at the cut, fill efficiency), `tools/show_game.py LOG IDX [PLY|sep|end]` (ASCII board with Voronoi tint), `tools/replay_ask.py ENGINE LOG IDX PLY` (replay to a ply and ask an engine what it would play), `tools/fill_accuracy.py ENGINE LOG…` (estimate vs. actual steps at the cut).
+
+What those tools showed on self-play at 20 ms: 98% of games end by separation; at the cut the flood margin is usually >20 cells; the loser then fills its chamber optimally in 86% of solvable cases (mean shortfall ≈0.2 cells), so the endgame is not where Elo is; plain Voronoi 40 plies before the cut already predicts 85% of winners. Midgame 1v1 often reaches **depth 14–15** in the 95 ms box; 4p mixed-Min typically completes depth 6.
 
 If both players are still alive after 900 rounds, the bench awards the larger flood fill (it used to default to player 0, which biased colour-swap stats).
 
@@ -544,8 +578,8 @@ If both players are still alive after 900 rounds, the bench awards the larger fl
 
 1. **Articulation / chamber tree** for fillable space — Tarjan APs + a1k0n battlefront (drop rear rooms). Tried; on this empty 30×20 the cuts appear too late and open-game Tarjan wrecked NPS. Revisit if late-game trail geometry looks worth it.
 2. **Max-N FFA** — if the mixed “closest hunts, others fill” model is still too scared or too optimistic, let every seat maximize its own `eval_ffa`.
-3. **Self-play tuning** of the open-game weights (`50 / 12 / 3 / 6 / 4`) against the voronoi-1ply baseline and against copies of itself.
-4. **Property cache, not cutoff TT.** A Zobrist table for alpha-beta cutoffs was ~0 Elo: sequential Tron almost never transposes at equal depth, so the hits were previous-iteration depth-misses. What *does* repeat, regardless of remaining depth, is the board itself — occupancy, heads, whose turn. Cache depth-independent facts for that key (Voronoi territory / edges / reach, `shares_space`, maybe `approx_fill`) so sibling lines and iterative-deepening re-searches skip the bitboard waves. Same paste-size and undo constraints as everything else.
+3. **Self-play tuning** of the open-game weights (`50 / 12 / 6 / 4`). One-at-a-time ±50–100% changes of each weight were all within noise at 20 ms (see the table under *Earlier SPRTs*), so the current point is a local optimum; a gain here would need a new feature, not a re-weighting.
+4. **Property cache, not cutoff TT.** A Zobrist table for alpha-beta cutoffs was ~0 Elo: sequential Tron almost never transposes at equal depth, so the hits were previous-iteration depth-misses (a TT used for move ordering was tried too: −12% nodes at fixed depth, because ordering is already near the √b minimal tree). What *does* repeat, regardless of remaining depth, is the board itself — occupancy, heads, whose turn. Cache depth-independent facts for that key (Voronoi territory / edges / reach, `shares_space`, maybe `approx_fill`) so sibling lines and iterative-deepening re-searches skip the bitboard waves. Same paste-size and undo constraints as everything else.
 5. **Incremental Voronoi on make/unmake.** A step moves one head and walls one cell, but ownership is “strictly closest,” so both distance maps can change (paths through the new wall, flips far from the head). True reverse-delta BFS is messy; the robust undo is a stack snapshot of the maps. Voronoi only runs at leaves today, so updating on every interior `apply` can cost more than recomputing at the leaf. The interesting variant is parent→leaf: keep maps on the search stack and repair one ply at a leaf. On this 30×20 the current row-bitboard waves are already cheap, so measure against a full recompute before keeping it. `kill` (whole ribbon vanishes) is a rebuild anyway. Cousin of (4): a cache skips exact repeats; this tries to update when the board only moved one cell.
 
 ---

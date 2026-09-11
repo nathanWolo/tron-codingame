@@ -63,15 +63,25 @@ def main():
     out = subprocess.run([binary, "--fill-eval"], input="".join(boards), capture_output=True, text=True).stdout
     lines = out.strip().split("\n")
     assert len(lines) == len(boards), (len(lines), len(boards))
-    errs = {"approx": [], "cb": [], "greedy": [], "flood": []}
-    sign_wrong = {"approx": 0, "cb": 0, "greedy": 0, "flood": 0}
+    errs = {"approx": [], "cb": [], "greedy": [], "flood": [], "exact": []}
+    sign_wrong = {"approx": 0, "cb": 0, "greedy": 0, "flood": 0, "exact": 0}
+    exact_gap = []
     n = 0
     for (winner, fl, after, ply), line in zip(meta, lines):
-        parts = [list(map(int, side.split())) for side in line.split("|")]
+        parts = []
+        for side in line.split("|"):
+            toks = side.split()
+            vals = list(map(int, toks[:4]))
+            ex = toks[4]
+            vals.append(int(ex.lstrip("~")))
+            vals.append(not ex.startswith("~"))
+            parts.append(vals)
         loser = 1 - winner
         actual_l = after[loser]
         # loser used all their space; compare estimates for the loser
-        f, a, c, gr = parts[loser]
+        f, a, c, gr, ex, ex_ok = parts[loser]
+        if ex_ok:
+            exact_gap.append((ex - actual_l, f, actual_l, ex, ply))
         errs["flood"].append(f - actual_l)
         errs["approx"].append(a - actual_l)
         errs["cb"].append(c - actual_l)
@@ -84,6 +94,11 @@ def main():
                 sign_wrong[key] += 1
         n += 1
     print(f"{n} separations")
+    exact_gap.sort()
+    print(f"exact solved for {len(exact_gap)} losers; gap (optimal - actual) histogram:")
+    from collections import Counter
+    print(sorted(Counter(min(g[0], 10) for g in exact_gap).items()))
+    print("worst:", exact_gap[-8:])
     for key in ("flood", "cb", "approx", "greedy"):
         e = sorted(errs[key])
         q = [e[int(len(e) * x)] for x in (0.05, 0.25, 0.5, 0.75, 0.95)]
