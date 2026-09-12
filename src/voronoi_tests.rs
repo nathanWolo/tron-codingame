@@ -456,7 +456,7 @@ fn voronoi_gap(state: &State) -> Option<String> {
             if !state.is_alive(player) {
                 continue;
             }
-            let fast_eval = eval_ffa(state, player, 0);
+            let fast_eval = eval_ffa(state, player, 0, 0);
             let slow_eval = eval_ffa_cell(state, player, 0, &slow);
             if fast_eval != slow_eval {
                 return Some(format!(
@@ -1184,6 +1184,43 @@ fn random_wall_state(rng: &mut XorShift, player_count: usize, walls: u32) -> Sta
         assert_eq!(checkerboard_path_bound(0, 5, 6), 10);
         assert_eq!(checkerboard_path_bound(1, 5, 6), 11);
         assert_eq!(checkerboard_path_bound(1, 1, 4), 3);
+    }
+
+    #[test]
+    fn rival_distances_match_cell_bfs() {
+        let mut rng = XorShift::new(23);
+        for i in 0..40 {
+            let plies = rng.gen_range(30);
+            let state = random_play_state(&mut rng, 4, plies);
+            for our_id in 0..4 {
+                if !state.is_alive(our_id) {
+                    continue;
+                }
+                let fast = rival_distances(&state, our_id);
+                let d = bfs_distances(&state, our_id);
+                for rival in 0..4 {
+                    if rival == our_id || !state.is_alive(rival) {
+                        continue;
+                    }
+                    let (rc, rr) = (state.head_x[rival] as i32, state.head_y[rival] as i32);
+                    let mut best = UNREACHABLE;
+                    if heads_manhattan(&state, our_id, rival) == 1 {
+                        best = 1;
+                    } else {
+                        for dir in 0..4 {
+                            let (c, r) = (rc + DIR_X[dir], rr + DIR_Y[dir]);
+                            if in_bounds(c, r) && !state.occupied.is_set(c, r) {
+                                let dd = d[cell_index(c, r)];
+                                if dd < UNREACHABLE {
+                                    best = best.min(dd + 1);
+                                }
+                            }
+                        }
+                    }
+                    assert_eq!(fast[rival], best, "state {i} our {our_id} rival {rival}");
+                }
+            }
+        }
     }
 
     #[test]

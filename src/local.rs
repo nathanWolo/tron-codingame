@@ -429,7 +429,7 @@ fn profile() {
     let eval4_started = Instant::now();
     let mut checksum4 = 0i32;
     for _ in 0..eval_count {
-        checksum4 ^= eval_ffa(&state4, 0, 0);
+        checksum4 ^= eval_ffa(&state4, 0, 0, 0);
     }
     let eval4_time = eval4_started.elapsed();
     eprintln!(

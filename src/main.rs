@@ -82,6 +82,13 @@ struct Params {
     /// 1v1 cut leaf: eval units per fill cell and the win/loss contempt.
     fill: i32,
     fill_sign: i32,
+    /// FFA: rivals within this BFS distance of our head all branch as Min
+    /// (up to two); 0 = only the closest rival.
+    near: i32,
+    /// FFA: maximum number of Min seats (including the closest rival).
+    mins: i32,
+    /// FFA: percent of the Min seats’ own survival score subtracted from ours.
+    lam: i32,
 }
 
 const DEFAULT_PARAMS: Params = Params {
@@ -100,6 +107,9 @@ const DEFAULT_PARAMS: Params = Params {
     doom: 40,
     fill: 60,
     fill_sign: 80,
+    near: 0,
+    mins: 2,
+    lam: 0,
 };
 
 static PARAMS: std::sync::OnceLock<Params> = std::sync::OnceLock::new();
@@ -129,6 +139,9 @@ fn params() -> &'static Params {
                     "doom" => p.doom = value,
                     "fill" => p.fill = value,
                     "fill_sign" => p.fill_sign = value,
+                    "near" => p.near = value,
+                    "mins" => p.mins = value,
+                    "lam" => p.lam = value,
                     _ => {}
                 }
             }
@@ -1358,6 +1371,56 @@ fn main_opponent(state: &State, our_id: usize) -> Option<usize> {
     best_player
 }
 
+/// BFS step distance from our head to each rival’s head (through empty
+/// cells; adjacent = 1), `UNREACHABLE` if we cannot get there.
+///
+/// **Where:** [`choose_move`] in FFA, to pick which rivals branch as Min.
+fn rival_distances(state: &State, our_id: usize) -> [u16; MAX_PLAYERS] {
+    let player_count = state.player_count as usize;
+    let mut dist = [UNREACHABLE; MAX_PLAYERS];
+    let empty = empty_rows(state);
+    let mut opp_seed = [[0u32; 20]; MAX_PLAYERS];
+    let mut pending = 0u8;
+    for player in 0..player_count {
+        if player != our_id && state.is_alive(player) {
+            opp_seed[player] = head_seed(state, player, &empty);
+            if heads_manhattan(state, our_id, player) == 1 {
+                dist[player] = 1;
+            } else {
+                pending |= 1 << player;
+            }
+        }
+    }
+    let mut frontier = head_seed(state, our_id, &empty);
+    let mut seen = frontier;
+    let mut wave = 1u16;
+    while pending != 0 {
+        let mut any = false;
+        for row in 0..20 {
+            if frontier[row] != 0 {
+                any = true;
+                break;
+            }
+        }
+        if !any {
+            break;
+        }
+        for player in 0..player_count {
+            if pending & (1 << player) != 0 && masks_overlap(&frontier, &opp_seed[player]) {
+                dist[player] = wave + 1;
+                pending &= !(1 << player);
+            }
+        }
+        let expanded = expand_mask(&frontier, &empty);
+        for row in 0..20 {
+            frontier[row] = expanded[row] & !seen[row];
+            seen[row] |= frontier[row];
+        }
+        wave += 1;
+    }
+    dist
+}
+
 /// True if `our_id` and `opponent` can still meet through empty cells.
 ///
 /// Adjacent heads count as connected. Otherwise we BFS from us and check
@@ -1672,7 +1735,7 @@ fn eval_1v1(
 /// **Where:** leaves of [`paranoid_max`].
 /// **Why:** deep 1v1 minimax in a 3–4 player game treats others as frozen walls
 /// and suicides. This leaf prefers “survive with space” over picking a fight.
-fn eval_ffa(state: &State, our_id: usize, ply: i32) -> i32 {
+fn eval_ffa(state: &State, our_id: usize, threat: usize, ply: i32) -> i32 {
     if !state.is_alive(our_id) {
         return -MATE_SCORE + ply;
     }
@@ -1696,27 +1759,52 @@ fn eval_ffa(state: &State, our_id: usize, ply: i32) -> i32 {
     if doomed != 0 {
         voronoi = compute_voronoi_ffa_ex(state, our_id, doomed);
     }
-    let mut best_other_territory = 0;
-    let mut best_other_reach = 0;
-    for player in 0..player_count {
-        if player == our_id || !state.is_alive(player) || doomed & (1 << player) != 0 {
-            continue;
-        }
-        best_other_territory = best_other_territory.max(voronoi.territory[player]);
-        best_other_reach = best_other_reach.max(voronoi.reachable[player]);
-    }
-    let our_col = state.head_x[our_id] as i32;
-    let our_row = state.head_y[our_id] as i32;
-    let center_penalty = -((our_col - 14).abs() + (our_row - 9).abs());
+    let p = params();
     let occupied_count = mask_popcount(&state.occupied.bits);
     let center_weight = (500 - occupied_count).max(0) / 80;
-    let p = params();
-    voronoi.reachable[our_id] * p.f_reach + voronoi.territory[our_id] * p.f_terr
-        - best_other_territory * p.f_oterr
-        - best_other_reach * p.f_oreach
-        + voronoi.edge_sum[our_id] * p.f_edges
-        + mobility(state, our_id) * p.f_mob
-        + center_penalty * center_weight
+    // Survival score of one seat on the (possibly projected) board.
+    let seat_score = |seat: usize| -> i32 {
+        let mut best_other_territory = 0;
+        let mut best_other_reach = 0;
+        for player in 0..player_count {
+            if player == seat || !state.is_alive(player) || doomed & (1 << player) != 0 {
+                continue;
+            }
+            best_other_territory = best_other_territory.max(voronoi.territory[player]);
+            best_other_reach = best_other_reach.max(voronoi.reachable[player]);
+        }
+        let col = state.head_x[seat] as i32;
+        let row = state.head_y[seat] as i32;
+        let center_penalty = -((col - 14).abs() + (row - 9).abs());
+        voronoi.reachable[seat] * p.f_reach + voronoi.territory[seat] * p.f_terr
+            - best_other_territory * p.f_oterr
+            - best_other_reach * p.f_oreach
+            + voronoi.edge_sum[seat] * p.f_edges
+            + mobility(state, seat) * p.f_mob
+            + center_penalty * center_weight
+    };
+    let mut score = seat_score(our_id);
+    // Min seats also care about their own space: subtract a share of their
+    // survival score so the model rival neither suicides to hurt us nor is
+    // expected to, and so we value squeezing them.
+    if p.lam > 0 {
+        let mut total = 0i32;
+        let mut count = 0i32;
+        for player in 0..player_count {
+            if threat & (1 << player) != 0
+                && player != our_id
+                && state.is_alive(player)
+                && doomed & (1 << player) == 0
+            {
+                total += seat_score(player);
+                count += 1;
+            }
+        }
+        if count > 0 {
+            score -= total * p.lam / (100 * count);
+        }
+    }
+    score
 }
 
 /// Clock and move-ordering state for one call to [`choose_move`].
@@ -2027,16 +2115,19 @@ fn next_seat(player: usize, player_count: usize) -> usize {
     (player + 1) % player_count
 }
 
-/// First living rival, preferring `threat` if they are still up.
+/// Living Min seats: `threat` is a bitmask; if none of them is alive, the
+/// first living rival becomes the Min.
 #[inline]
 fn living_threat(state: &State, our_id: usize, threat: usize) -> usize {
-    if threat != our_id && state.is_alive(threat) {
-        return threat;
+    // `threat` is a bitmask of Min seats; drop the dead ones.
+    let mask = threat & state.alive_mask as usize & !(1 << our_id);
+    if mask != 0 {
+        return mask;
     }
     let player_count = state.player_count as usize;
     for player in 0..player_count {
         if player != our_id && state.is_alive(player) {
-            return player;
+            return 1 << player;
         }
     }
     threat
@@ -2104,7 +2195,7 @@ fn paranoid_max(
         return MATE_SCORE - ply;
     }
     if depth <= 0 {
-        return eval_ffa(state, our_id, ply);
+        return eval_ffa(state, our_id, threat, ply);
     }
     let (mut moves, move_count) = state.legal_moves(our_id);
     if move_count == 0 {
@@ -2236,7 +2327,7 @@ fn paranoid_min(
         state.restore_killed(to_move, trail, head_x, head_y);
         return score;
     }
-    if to_move != threat {
+    if threat & (1 << to_move) == 0 {
         let dir = greedy_space_dir(state, to_move, &moves, move_count, scratch);
         let old_col = state.head_x[to_move];
         let old_row = state.head_y[to_move];
@@ -2417,6 +2508,31 @@ fn choose_move(
     } else {
         main_opponent(state, our_id).unwrap_or(other_ids[0])
     };
+    // FFA Min seats: the closest rival, plus (with `near` > 0) the next one
+    // if it is also within `near` steps — a bike squeezed between two
+    // neighbours needs both of them to be taken seriously.
+    let mut threat_mask = 1usize << opponent;
+    if !is_duel && params().near > 0 {
+        let dist = rival_distances(state, our_id);
+        let mut extra = params().mins - 1;
+        while extra > 0 {
+            let mut next = None;
+            for i in 0..other_count {
+                let rival = other_ids[i];
+                if threat_mask & (1 << rival) == 0
+                    && (dist[rival] as i32) <= params().near
+                    && next.map_or(true, |(_, d)| dist[rival] < d)
+                {
+                    next = Some((rival, dist[rival]));
+                }
+            }
+            match next {
+                Some((rival, _)) => threat_mask |= 1 << rival,
+                None => break,
+            }
+            extra -= 1;
+        }
+    }
 
     #[cfg(any(test, feature = "local"))]
     let occupied_count: u32 = (0..20)
@@ -2529,7 +2645,7 @@ fn choose_move(
                     state,
                     our_id,
                     next_seat(our_id, player_count),
-                    opponent,
+                    threat_mask,
                     depth - 1,
                     1,
                     iter_best_score,
