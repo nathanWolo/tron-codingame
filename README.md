@@ -579,7 +579,7 @@ If both players are still alive after 900 rounds, the bench awards the larger fl
 
 | path | CodinGame? |
 |------|------------|
-| `src/main.rs` | **yes — paste this file only** (~78k characters, limit 100k) |
+| `src/main.rs` | **yes — paste this file only** (~99k characters, limit 100k) |
 | `src/local.rs` | no (`--bench` / `--profile`) |
 | `src/voronoi_tests.rs` | no (`cargo test`) |
 | `Cargo.toml` | no (their compiler; no `local` feature there) |

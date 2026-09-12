@@ -1518,27 +1518,14 @@ fn duel_voronoi(empty: &[u32; 20], seed_a: [u32; 20], seed_b: [u32; 20]) -> Duel
     }
 }
 
-/// Static 1v1 evaluation from `our_id`’s point of view (positive = good for our player).
+/// Static 1v1 evaluation from `our_id`’s point of view (positive = good).
 ///
-/// Terminal: we are dead → `-MATE_SCORE + ply`; they are dead → `MATE_SCORE - ply`
-/// (adding ply prefers faster wins / slower losses).
-///
-/// If the two bikes can no longer reach each other, compare chamber fill
-/// estimates plus wall-hugging. Otherwise combine Voronoi territory, frontier
-/// edges, raw reach, mobility, battlefront length, and a center bias that
-/// fades as the board fills.
-///
-/// Open-game path: flood us first (same test as [`shares_space`]), then flood
-/// them and paint. That skips the extra independent flood [`compute_voronoi`]
-/// would redo for us.
-///
-/// **Where:** leaves of [`negamax_1v1`]; `--bench` `bot_voronoi1`.
-/// **Why:** this is *the* 1v1 heuristic. Search only looks a few plies; the
-/// leaf has to encode “who owns the remaining empty board.” An early version
-/// added a huge separated-bonus here and minimax hallucinated fake cuts —
-/// do not reintroduce that. Switching to fill inside the tree is also a
-/// scale change; keep it only for positions that are already cut, not as a
-/// bonus for “looking cut.”
+/// Terminals are mate scores. If the bikes can no longer reach each other,
+/// compare chamber fill estimates plus wall-hugging (and remember the position
+/// in the cut cache). Otherwise Voronoi territory, frontier edges, mobility,
+/// battlefront length, and a center bias that fades as the board fills.
+/// Do not add a bonus for “looking cut”: an early version did and minimax
+/// hallucinated fake cuts.
 fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &mut Scratch) -> i32 {
     if !state.is_alive(our_id) {
         return -MATE_SCORE + ply;
@@ -1773,24 +1760,12 @@ fn order_moves(
     }
 }
 
-/// Negamax alpha-beta for a 1v1 duel.
-///
-/// Score is always from `to_move`’s point of view; the caller negates. `our_id`
-/// and `opponent` are the two colours at the root and never swap — [`eval_1v1`]
-/// is written from `our_id`’s side, then flipped if the opponent is to move.
-///
-/// `depth` is remaining plies to a leaf. `ply` is distance from the root
-/// (used to prefer faster mates). `qs_left` is remaining quiescence extensions.
-/// `last_dir_*` help move ordering (prefer continuing straight). Returns
-/// [`TIMEOUT_SCORE`] if the budget expired; the caller must ignore that
-/// iteration.
-///
-/// **Where:** only the iterative-deepening loop in [`choose_move`], and only
-/// when exactly two bikes are alive and still share space.
-/// **Why:** sequential Tron is a two-player game once it is a duel. A few
-/// plies of minimax plus Voronoi leaves beat greedy 1-ply; FFA must not
-/// call this (it treats extra bikes as frozen walls). Horizon nodes that are
-/// still tactical ([`wants_quiescence`]) search extra plies instead of eval.
+/// Negamax alpha-beta for a 1v1 duel. Score is always from `to_move`’s point
+/// of view (the caller negates); `our_id` / `opponent` never swap and
+/// [`eval_1v1`] is flipped when the opponent is to move. `depth` is plies to
+/// go, `ply` the distance from the root (faster mates score higher),
+/// `qs_left` the remaining tactical extensions. Returns [`TIMEOUT_SCORE`]
+/// once the clock runs out; every frame still undoes its move.
 fn negamax_1v1(
     state: &mut State,
     our_id: usize,
@@ -2317,29 +2292,12 @@ fn fill_direction(
 
 /// Choose a direction (0=UP .. 3=RIGHT) for `our_id` within `budget_ms`.
 ///
-/// Policy:
-/// - No legal moves → dummy `0` (we crash next turn anyway).
-/// - One legal move → play it immediately.
-/// - Nobody else alive → isolated [`fill_direction`].
-/// - 1v1 and the two chambers are cut off → greedy fill to completion
-///   (this path skips minimax, so the turn budget is available).
-/// - 3+ living players → iterative-deepening paranoid search ([`paranoid_min`]
-///   after each of our moves). Closest rival is Min; others play one greedy
-///   space-keeping reply. No 2-ply warmup; ID starts from the first ordered
-///   move, cap 50.
-/// - 1v1 still connected → iterative-deepening [`negamax_1v1`] up to depth 50
-///   or the time budget. After depth 1, each iteration uses an aspiration
-///   window of [`ASPIRATION_DELTA`] around the previous score and re-searches
-///   full-window on fail-high/fail-low (skipped near mate). Tactical leaves
-///   (adjacent heads, one escape, or a cut this ply) extend up to [`QS_MAX`]
-///   extra plies. There is no 2-ply Voronoi warmup; ID starts from the first
-///   ordered move so search gets the full remaining budget.
-///
-/// `last_dir` is the direction we played last turn (`NO_MOVE` on turn 1); it
-/// is a small move-ordering / fill-continuation hint, not a hard constraint.
-///
-/// **Where:** [`codingame`] every turn; `--bench` `Bot::Agent`; `--profile`.
-/// **Why:** this is the whole policy. Everything else is a helper it calls.
+/// 0 legal moves → `0`; 1 → play it; nobody else alive → [`fill_direction`];
+/// 1v1 cut off → primed greedy fill to completion; 3+ alive → iterative
+/// deepening paranoid search (closest rival, plus a second one within
+/// [`FFA_NEAR_STEPS`], branch as Min; others reply greedily); 1v1 connected →
+/// iterative deepening [`negamax_1v1`] with aspiration windows and tactical
+/// extensions. `last_dir` is only a move-ordering hint.
 fn choose_move(
     state: &mut State,
     our_id: usize,
