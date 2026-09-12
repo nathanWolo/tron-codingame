@@ -95,6 +95,10 @@ struct Params {
     ffa_qs: i32,
     /// FFA greedy rival model: per Manhattan step from the nearest other head.
     g_away: i32,
+    /// FFA: Manhattan radius at which a rival joins the Min seats mid-search.
+    dyn_near: i32,
+    /// FFA: eval units subtracted per frontier cell of our unique territory.
+    f_front: i32,
 }
 
 const DEFAULT_PARAMS: Params = Params {
@@ -119,6 +123,8 @@ const DEFAULT_PARAMS: Params = Params {
     ffa_asp: 0,
     ffa_qs: 0,
     g_away: 0,
+    dyn_near: 0,
+    f_front: 0,
 };
 
 static PARAMS: std::sync::OnceLock<Params> = std::sync::OnceLock::new();
@@ -154,6 +160,8 @@ fn params() -> &'static Params {
                     "ffa_asp" => p.ffa_asp = value,
                     "ffa_qs" => p.ffa_qs = value,
                     "g_away" => p.g_away = value,
+                    "dyn_near" => p.dyn_near = value,
+                    "f_front" => p.f_front = value,
                     _ => {}
                 }
             }
@@ -1796,6 +1804,24 @@ fn eval_ffa(state: &State, our_id: usize, threat: usize, ply: i32) -> i32 {
             + center_penalty * center_weight
     };
     let mut score = seat_score(our_id);
+    // Frontier cells (ours, touching a rival’s unique cells) are only ours by
+    // one step; a land grab decides them later, so discount them.
+    if p.f_front != 0 {
+        let mut rivals = [0u32; 20];
+        for player in 0..player_count {
+            if player != our_id && state.is_alive(player) && doomed & (1 << player) == 0 {
+                for row in 0..20 {
+                    rivals[row] |= voronoi.owned[player][row];
+                }
+            }
+        }
+        let halo = expand_mask_board(&rivals);
+        let mut front = 0i32;
+        for row in 0..20 {
+            front += (voronoi.owned[our_id][row] & halo[row]).count_ones() as i32;
+        }
+        score -= front * p.f_front;
+    }
     // Min seats also care about their own space: subtract a share of their
     // survival score so the model rival neither suicides to hurt us nor is
     // expected to, and so we value squeezing them.
@@ -2229,6 +2255,24 @@ fn paranoid_max(
         return eval_ffa(state, our_id, threat, ply);
     }
     let player_count = state.player_count as usize;
+    // Dynamic gating: a rival that has come within `dyn_near` Manhattan steps
+    // inside the tree joins the Min seats (at most two Mins).
+    let mut threat = threat;
+    let dyn_near = params().dyn_near;
+    if dyn_near > 0 && (threat & state.alive_mask as usize).count_ones() < 2 {
+        let mut best = None;
+        for player in 0..player_count {
+            if player != our_id && state.is_alive(player) && threat & (1 << player) == 0 {
+                let d = heads_manhattan(state, our_id, player);
+                if d <= dyn_near && best.map_or(true, |(_, bd)| d < bd) {
+                    best = Some((player, d));
+                }
+            }
+        }
+        if let Some((player, _)) = best {
+            threat |= 1 << player;
+        }
+    }
     let mut target_col = state.head_x[our_id] as i32;
     let mut target_row = state.head_y[our_id] as i32;
     for player in 0..player_count {
