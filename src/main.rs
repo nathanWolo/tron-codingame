@@ -99,6 +99,9 @@ struct Params {
     dyn_near: i32,
     /// FFA: eval units subtracted per frontier cell of our unique territory.
     f_front: i32,
+    /// FFA root: rollout rounds (0 = off) and the bonus weight in percent.
+    roll: i32,
+    roll_w: i32,
 }
 
 const DEFAULT_PARAMS: Params = Params {
@@ -125,6 +128,8 @@ const DEFAULT_PARAMS: Params = Params {
     g_away: 0,
     dyn_near: 0,
     f_front: 0,
+    roll: 0,
+    roll_w: 50,
 };
 
 static PARAMS: std::sync::OnceLock<Params> = std::sync::OnceLock::new();
@@ -162,6 +167,8 @@ fn params() -> &'static Params {
                     "g_away" => p.g_away = value,
                     "dyn_near" => p.dyn_near = value,
                     "f_front" => p.f_front = value,
+                    "roll" => p.roll = value,
+                    "roll_w" => p.roll_w = value,
                     _ => {}
                 }
             }
@@ -1845,6 +1852,54 @@ fn eval_ffa(state: &State, our_id: usize, threat: usize, ply: i32) -> i32 {
     score
 }
 
+/// Land-grab rollout: from `state` (our move already applied), every living
+/// bike in seat order plays the 1-ply [`eval_ffa`]-greedy move for up to
+/// `rounds` rounds or until no rival shares our component. Returns our
+/// [`eval_ffa`] of the end position — a cheap long-horizon estimate of the
+/// chamber we end up sealed in.
+fn ffa_rollout(state: &State, our_id: usize, rounds: i32) -> i32 {
+    let mut sim = *state;
+    let player_count = sim.player_count as usize;
+    for _ in 0..rounds {
+        if !sim.is_alive(our_id) {
+            break;
+        }
+        let mut shared = false;
+        for player in 0..player_count {
+            if player != our_id && sim.is_alive(player) && shares_space(&sim, our_id, player) {
+                shared = true;
+                break;
+            }
+        }
+        if !shared {
+            break;
+        }
+        for player in 0..player_count {
+            if !sim.is_alive(player) {
+                continue;
+            }
+            let (moves, count) = sim.legal_moves(player);
+            if count == 0 {
+                sim.kill(player);
+                continue;
+            }
+            let mut best_dir = moves[0];
+            let mut best = i32::MIN;
+            for i in 0..count {
+                let mut child = sim;
+                child.apply(player, moves[i] as usize);
+                let score = eval_ffa(&child, player, 0, 0);
+                if score > best {
+                    best = score;
+                    best_dir = moves[i];
+                }
+            }
+            sim.apply(player, best_dir as usize);
+        }
+    }
+    eval_ffa(&sim, our_id, 0, 0)
+}
+
 /// Clock and move-ordering state for one call to [`choose_move`].
 ///
 /// `killers[ply % 64]` stores up to two direction indices that caused a beta
@@ -2689,6 +2744,24 @@ fn choose_move(
         // branches; other bikes play one greedy space-keeping reply).
         let max_ffa_depth = 50;
         let player_count = state.player_count as usize;
+        // Optional long-horizon bonus per root move from a greedy land-grab
+        // rollout, centred on the mean so it only re-ranks moves.
+        let mut bonus = [0i32; 4];
+        if params().roll > 0 {
+            let mut raw = [0i32; 4];
+            let mut sum = 0i32;
+            for move_i in 0..move_count {
+                let mut child = *state;
+                child.apply(our_id, moves[move_i] as usize);
+                raw[moves[move_i] as usize] = ffa_rollout(&child, our_id, params().roll);
+                sum += raw[moves[move_i] as usize];
+            }
+            let mean = sum / move_count as i32;
+            for move_i in 0..move_count {
+                let dir = moves[move_i] as usize;
+                bonus[dir] = (raw[dir] - mean) * params().roll_w / 100;
+            }
+        }
         let mut prev_score: Option<i32> = None;
         for depth in 1..=max_ffa_depth {
             if Instant::now() >= search.deadline {
@@ -2729,18 +2802,22 @@ fn choose_move(
                     let old_col = state.head_x[our_id];
                     let old_row = state.head_y[our_id];
                     state.apply(our_id, moves[move_i] as usize);
-                    let score = paranoid_min(
+                    let shift = bonus[moves[move_i] as usize];
+                    let mut score = paranoid_min(
                         state,
                         our_id,
                         next_seat(our_id, player_count),
                         threat_mask,
                         depth - 1,
                         1,
-                        alpha,
-                        window_beta,
+                        alpha.saturating_sub(shift),
+                        window_beta.saturating_sub(shift),
                         &mut search,
                         scratch,
                     );
+                    if !search.timed_out && score.abs() < MATE_SCORE - 1000 {
+                        score += shift;
+                    }
                     state.undo_step(our_id, old_col, old_row);
                     if search.timed_out {
                         completed_iteration = false;
