@@ -239,7 +239,7 @@ fn eval_ffa_cell(state: &State, our_id: usize, ply: i32, slow: &Voronoi) -> i32 
     for player in 0..player_count {
         if player != our_id
             && state.is_alive(player)
-            && slow.reachable[player] <= params().doom
+            && slow.reachable[player] <= FFA_DOOM_CELLS
             && slow.reachable[player] < slow.reachable[our_id]
         {
             doomed |= 1 << player;
@@ -402,7 +402,7 @@ fn voronoi_gap(state: &State) -> Option<String> {
     }
     if player_count >= 2 && state.is_alive(0) && state.is_alive(1) {
         let mut scratch = Scratch::new();
-        let fast_eval = eval_1v1(state, 0, 1, 0, 0, &mut scratch);
+        let fast_eval = eval_1v1(state, 0, 1, 0, &mut scratch);
         let slow_share = shares_space_cell(state, 0, 1);
         let slow_eval = if !state.is_alive(0) {
             -MATE_SCORE
@@ -421,8 +421,8 @@ fn voronoi_gap(state: &State) -> Option<String> {
                 state.head_x[1] as i32,
                 state.head_y[1] as i32,
             );
-            fill_diff.signum() * params().fill_sign
-                + fill_diff * params().fill
+            fill_diff.signum() * 80
+                + fill_diff * 60
                 + hug * 5
                 + (mobility(state, 0) - mobility(state, 1))
         } else {
@@ -456,7 +456,7 @@ fn voronoi_gap(state: &State) -> Option<String> {
             if !state.is_alive(player) {
                 continue;
             }
-            let fast_eval = eval_ffa(state, player, 0, 0);
+            let fast_eval = eval_ffa(state, player, 0);
             let slow_eval = eval_ffa_cell(state, player, 0, &slow);
             if fast_eval != slow_eval {
                 return Some(format!(
@@ -572,7 +572,7 @@ fn oneply_best(state: &mut State, player: usize, opponent: usize, scratch: &mut 
         let old_col = state.head_x[player];
         let old_row = state.head_y[player];
         state.apply(player, legal[i] as usize);
-        let score = eval_1v1(state, player, opponent, opponent, 1, scratch);
+        let score = eval_1v1(state, player, opponent, 1, scratch);
         state.undo_step(player, old_col, old_row);
         if score > best_score {
             best_score = score;

@@ -59,127 +59,15 @@ const COL_MASK: u32 = (1 << 30) - 1;
 /// with an odd row it is `(col + row)` odd. Used by the checkerboard fill bound.
 const EVEN_COLS: u32 = 0x1555_5555;
 
-/// Tunable 1v1 eval weights; `TRON_PARAMS` (`name=value,...`) overrides for
-/// local tuning runs only.
-#[derive(Clone, Copy)]
-struct Params {
-    terr: i32,
-    edges: i32,
-    mob: i32,
-    front: i32,
-    center_div: i32,
-    /// Contested (equidistant) cells credited to the side that moves second,
-    /// in eval units per cell.
-    ties: i32,
-    // FFA eval weights.
-    f_reach: i32,
-    f_terr: i32,
-    f_oterr: i32,
-    f_oreach: i32,
-    f_edges: i32,
-    f_mob: i32,
-    doom: i32,
-    /// 1v1 cut leaf: eval units per fill cell and the win/loss contempt.
-    fill: i32,
-    fill_sign: i32,
-    /// FFA: rivals within this BFS distance of our head all branch as Min
-    /// (up to two); 0 = only the closest rival.
-    near: i32,
-    /// FFA: maximum number of Min seats (including the closest rival).
-    mins: i32,
-    /// FFA: percent of the Min seats’ own survival score subtracted from ours.
-    lam: i32,
-    /// FFA aspiration half-window (0 = full-window every depth).
-    ffa_asp: i32,
-    /// FFA: extra rounds searched past the horizon while we have one exit.
-    ffa_qs: i32,
-    /// FFA greedy rival model: per Manhattan step from the nearest other head.
-    g_away: i32,
-    /// FFA: Manhattan radius at which a rival joins the Min seats mid-search.
-    dyn_near: i32,
-    /// FFA: eval units subtracted per frontier cell of our unique territory.
-    f_front: i32,
-    /// FFA root: rollout rounds (0 = off) and the bonus weight in percent.
-    roll: i32,
-    roll_w: i32,
-    /// 1v1 root: rollout rounds (0 = off); shares `roll_w`.
-    roll1: i32,
-}
-
-const DEFAULT_PARAMS: Params = Params {
-    terr: 50,
-    edges: 12,
-    mob: 6,
-    front: 4,
-    center_div: 80,
-    ties: 0,
-    f_reach: 40,
-    f_terr: 25,
-    f_oterr: 10,
-    f_oreach: 4,
-    f_edges: 12,
-    f_mob: 20,
-    doom: 40,
-    fill: 60,
-    fill_sign: 80,
-    near: 12,
-    mins: 2,
-    lam: 0,
-    ffa_asp: 0,
-    ffa_qs: 0,
-    g_away: 0,
-    dyn_near: 0,
-    f_front: 0,
-    roll: 0,
-    roll_w: 50,
-    roll1: 0,
-};
-
-static PARAMS: std::sync::OnceLock<Params> = std::sync::OnceLock::new();
-
-#[inline]
-fn params() -> &'static Params {
-    PARAMS.get_or_init(|| {
-        let mut p = DEFAULT_PARAMS;
-        if let Ok(spec) = std::env::var("TRON_PARAMS") {
-            for item in spec.split(',') {
-                let mut kv = item.split('=');
-                let key = kv.next().unwrap_or("").trim();
-                let value: i32 = kv.next().and_then(|v| v.trim().parse().ok()).unwrap_or(0);
-                match key {
-                    "terr" => p.terr = value,
-                    "edges" => p.edges = value,
-                    "mob" => p.mob = value,
-                    "front" => p.front = value,
-                    "center_div" => p.center_div = value,
-                    "ties" => p.ties = value,
-                    "f_reach" => p.f_reach = value,
-                    "f_terr" => p.f_terr = value,
-                    "f_oterr" => p.f_oterr = value,
-                    "f_oreach" => p.f_oreach = value,
-                    "f_edges" => p.f_edges = value,
-                    "f_mob" => p.f_mob = value,
-                    "doom" => p.doom = value,
-                    "fill" => p.fill = value,
-                    "fill_sign" => p.fill_sign = value,
-                    "near" => p.near = value,
-                    "mins" => p.mins = value,
-                    "lam" => p.lam = value,
-                    "ffa_asp" => p.ffa_asp = value,
-                    "ffa_qs" => p.ffa_qs = value,
-                    "g_away" => p.g_away = value,
-                    "dyn_near" => p.dyn_near = value,
-                    "f_front" => p.f_front = value,
-                    "roll" => p.roll = value,
-                    "roll_w" => p.roll_w = value,
-                    "roll1" => p.roll1 = value,
-                    _ => {}
-                }
-            }
-        }
-        p
-    })
-}
+/// FFA: rivals with this many reachable cells or fewer, sealed off from us,
+/// are treated as already gone — CodinGame erases a dead bike’s whole
+/// ribbon, so their trail is space the survivors next to it inherit.
+const FFA_DOOM_CELLS: i32 = 40;
+/// FFA: a second rival within this many BFS steps of our head also branches
+/// as Min (the closest rival always does). 4p self-play: +32 / +25 vs one Min.
+const FFA_NEAR_STEPS: u16 = 12;
+/// FFA: at most this many Min seats (three was measurably worse).
+const FFA_MAX_MINS: usize = 2;
 
 const TURN_BUDGET_MS: u64 = 95;
 const FIRST_TURN_BUDGET_MS: u64 = 95;
@@ -1580,8 +1468,6 @@ struct DuelVoronoi {
     owned_a: [u32; 20],
     owned_b: [u32; 20],
     connected: bool,
-    /// Cells both bikes reach in the same wave (contested).
-    ties: i32,
 }
 
 fn duel_voronoi(empty: &[u32; 20], seed_a: [u32; 20], seed_b: [u32; 20]) -> DuelVoronoi {
@@ -1625,15 +1511,10 @@ fn duel_voronoi(empty: &[u32; 20], seed_a: [u32; 20], seed_b: [u32; 20]) -> Duel
             break;
         }
     }
-    let mut ties = 0i32;
-    for row in 0..20 {
-        ties += (claimed_a[row] & claimed_b[row]).count_ones() as i32;
-    }
     DuelVoronoi {
         owned_a,
         owned_b,
         connected: touch != 0,
-        ties,
     }
 }
 
@@ -1658,14 +1539,7 @@ fn duel_voronoi(empty: &[u32; 20], seed_a: [u32; 20], seed_b: [u32; 20]) -> Duel
 /// do not reintroduce that. Switching to fill inside the tree is also a
 /// scale change; keep it only for positions that are already cut, not as a
 /// bonus for “looking cut.”
-fn eval_1v1(
-    state: &State,
-    our_id: usize,
-    opponent: usize,
-    to_move: usize,
-    ply: i32,
-    scratch: &mut Scratch,
-) -> i32 {
+fn eval_1v1(state: &State, our_id: usize, opponent: usize, ply: i32, scratch: &mut Scratch) -> i32 {
     if !state.is_alive(our_id) {
         return -MATE_SCORE + ply;
     }
@@ -1698,11 +1572,8 @@ fn eval_1v1(
         let fill_diff = our_fill - opp_fill;
         let hug = wall_neighbor_count(state, our_col, our_row)
             - wall_neighbor_count(state, opp_col, opp_row);
-        let p = params();
-        let score = fill_diff.signum() * p.fill_sign
-            + fill_diff * p.fill
-            + hug * 5
-            + (our_mobility - opp_mobility);
+        let score =
+            fill_diff.signum() * 80 + fill_diff * 60 + hug * 5 + (our_mobility - opp_mobility);
         // Remember this cut position so a later, deeper iteration can stop
         // here instead of expanding two independent chambers.
         let slot = (state.hash >> (64 - CUT_CACHE_BITS)) as usize;
@@ -1710,7 +1581,6 @@ fn eval_1v1(
         scratch.cut_scores[slot] = score;
         return score;
     }
-    let ties = duel.as_ref().map_or(0, |d| d.ties);
     let voronoi = if let Some(duel) = duel {
         let mut owned = [[0u32; 20]; MAX_PLAYERS];
         let mut territory = [0i32; MAX_PLAYERS];
@@ -1738,21 +1608,12 @@ fn eval_1v1(
     let front = battlefront(&voronoi.owned[our_id], &voronoi.owned[opponent]);
     let center_penalty = -((our_col - 14).abs() + (our_row - 9).abs());
     let occupied_count = mask_popcount(&state.occupied.bits);
-    let p = params();
-    let center_weight = if p.center_div > 0 {
-        (500 - occupied_count).max(0) / p.center_div
-    } else {
-        0
-    };
-    // Contested cells favour the bike that moves second (it can answer the
-    // first mover's commitment), so credit them against the side to move.
-    let tie_score = if to_move == our_id { -ties } else { ties } * p.ties;
-    territory * p.terr
-        + edges * p.edges
-        + mobility_diff * p.mob
-        + front * p.front
+    let center_weight = (500 - occupied_count).max(0) / 80;
+    territory * 50
+        + edges * 12
+        + mobility_diff * 6
+        + front * 4
         + center_penalty * center_weight
-        + tie_score
 }
 
 /// Free-for-all evaluation from `our_id`’s point of view.
@@ -1766,7 +1627,7 @@ fn eval_1v1(
 /// **Where:** leaves of [`paranoid_max`].
 /// **Why:** deep 1v1 minimax in a 3–4 player game treats others as frozen walls
 /// and suicides. This leaf prefers “survive with space” over picking a fight.
-fn eval_ffa(state: &State, our_id: usize, threat: usize, ply: i32) -> i32 {
+fn eval_ffa(state: &State, our_id: usize, ply: i32) -> i32 {
     if !state.is_alive(our_id) {
         return -MATE_SCORE + ply;
     }
@@ -1781,7 +1642,7 @@ fn eval_ffa(state: &State, our_id: usize, threat: usize, ply: i32) -> i32 {
     for player in 0..player_count {
         if player != our_id
             && state.is_alive(player)
-            && voronoi.reachable[player] <= params().doom
+            && voronoi.reachable[player] <= FFA_DOOM_CELLS
             && voronoi.reachable[player] < voronoi.reachable[our_id]
         {
             doomed |= 1 << player;
@@ -1790,153 +1651,25 @@ fn eval_ffa(state: &State, our_id: usize, threat: usize, ply: i32) -> i32 {
     if doomed != 0 {
         voronoi = compute_voronoi_ffa_ex(state, our_id, doomed);
     }
-    let p = params();
+    let mut best_other_territory = 0;
+    let mut best_other_reach = 0;
+    for player in 0..player_count {
+        if player == our_id || !state.is_alive(player) || doomed & (1 << player) != 0 {
+            continue;
+        }
+        best_other_territory = best_other_territory.max(voronoi.territory[player]);
+        best_other_reach = best_other_reach.max(voronoi.reachable[player]);
+    }
+    let our_col = state.head_x[our_id] as i32;
+    let our_row = state.head_y[our_id] as i32;
+    let center_penalty = -((our_col - 14).abs() + (our_row - 9).abs());
     let occupied_count = mask_popcount(&state.occupied.bits);
     let center_weight = (500 - occupied_count).max(0) / 80;
-    // Survival score of one seat on the (possibly projected) board.
-    let seat_score = |seat: usize| -> i32 {
-        let mut best_other_territory = 0;
-        let mut best_other_reach = 0;
-        for player in 0..player_count {
-            if player == seat || !state.is_alive(player) || doomed & (1 << player) != 0 {
-                continue;
-            }
-            best_other_territory = best_other_territory.max(voronoi.territory[player]);
-            best_other_reach = best_other_reach.max(voronoi.reachable[player]);
-        }
-        let col = state.head_x[seat] as i32;
-        let row = state.head_y[seat] as i32;
-        let center_penalty = -((col - 14).abs() + (row - 9).abs());
-        voronoi.reachable[seat] * p.f_reach + voronoi.territory[seat] * p.f_terr
-            - best_other_territory * p.f_oterr
-            - best_other_reach * p.f_oreach
-            + voronoi.edge_sum[seat] * p.f_edges
-            + mobility(state, seat) * p.f_mob
-            + center_penalty * center_weight
-    };
-    let mut score = seat_score(our_id);
-    // Frontier cells (ours, touching a rival’s unique cells) are only ours by
-    // one step; a land grab decides them later, so discount them.
-    if p.f_front != 0 {
-        let mut rivals = [0u32; 20];
-        for player in 0..player_count {
-            if player != our_id && state.is_alive(player) && doomed & (1 << player) == 0 {
-                for row in 0..20 {
-                    rivals[row] |= voronoi.owned[player][row];
-                }
-            }
-        }
-        let halo = expand_mask_board(&rivals);
-        let mut front = 0i32;
-        for row in 0..20 {
-            front += (voronoi.owned[our_id][row] & halo[row]).count_ones() as i32;
-        }
-        score -= front * p.f_front;
-    }
-    // Min seats also care about their own space: subtract a share of their
-    // survival score so the model rival neither suicides to hurt us nor is
-    // expected to, and so we value squeezing them.
-    if p.lam > 0 {
-        let mut total = 0i32;
-        let mut count = 0i32;
-        for player in 0..player_count {
-            if threat & (1 << player) != 0
-                && player != our_id
-                && state.is_alive(player)
-                && doomed & (1 << player) == 0
-            {
-                total += seat_score(player);
-                count += 1;
-            }
-        }
-        if count > 0 {
-            score -= total * p.lam / (100 * count);
-        }
-    }
-    score
-}
-
-/// Land-grab rollout: from `state` (our move already applied), every living
-/// bike in seat order plays the 1-ply [`eval_ffa`]-greedy move for up to
-/// `rounds` rounds or until no rival shares our component. Returns our
-/// [`eval_ffa`] of the end position — a cheap long-horizon estimate of the
-/// chamber we end up sealed in.
-fn ffa_rollout(state: &State, our_id: usize, rounds: i32) -> i32 {
-    let mut sim = *state;
-    let player_count = sim.player_count as usize;
-    for _ in 0..rounds {
-        if !sim.is_alive(our_id) {
-            break;
-        }
-        let mut shared = false;
-        for player in 0..player_count {
-            if player != our_id && sim.is_alive(player) && shares_space(&sim, our_id, player) {
-                shared = true;
-                break;
-            }
-        }
-        if !shared {
-            break;
-        }
-        for player in 0..player_count {
-            if !sim.is_alive(player) {
-                continue;
-            }
-            let (moves, count) = sim.legal_moves(player);
-            if count == 0 {
-                sim.kill(player);
-                continue;
-            }
-            let mut best_dir = moves[0];
-            let mut best = i32::MIN;
-            for i in 0..count {
-                let mut child = sim;
-                child.apply(player, moves[i] as usize);
-                let score = eval_ffa(&child, player, 0, 0);
-                if score > best {
-                    best = score;
-                    best_dir = moves[i];
-                }
-            }
-            sim.apply(player, best_dir as usize);
-        }
-    }
-    eval_ffa(&sim, our_id, 0, 0)
-}
-
-/// 1v1 rollout: both bikes play 1-ply [`eval_1v1`]-greedy for up to `rounds`
-/// rounds or until they are cut apart; returns our [`eval_1v1`] at the end.
-fn duel_rollout(state: &State, our_id: usize, opponent: usize, rounds: i32, scratch: &mut Scratch) -> i32 {
-    let mut sim = *state;
-    for _ in 0..rounds {
-        if !sim.is_alive(our_id) || !sim.is_alive(opponent) {
-            break;
-        }
-        if !shares_space(&sim, our_id, opponent) {
-            break;
-        }
-        for player in [opponent, our_id] {
-            let (moves, count) = sim.legal_moves(player);
-            if count == 0 {
-                sim.kill(player);
-                break;
-            }
-            let other = if player == our_id { opponent } else { our_id };
-            let mut best_dir = moves[0];
-            let mut best = i32::MIN;
-            for i in 0..count {
-                let mut child = sim;
-                child.apply(player, moves[i] as usize);
-                let score = eval_1v1(&child, player, other, other, 0, scratch);
-                if score > best {
-                    best = score;
-                    best_dir = moves[i];
-                }
-            }
-            sim.apply(player, best_dir as usize);
-        }
-    }
-    eval_1v1(&sim, our_id, opponent, our_id, 0, scratch)
+    voronoi.reachable[our_id] * 40 + voronoi.territory[our_id] * 25 - best_other_territory * 10
+        + -best_other_reach * 4
+        + voronoi.edge_sum[our_id] * 12
+        + mobility(state, our_id) * 20
+        + center_penalty * center_weight
 }
 
 /// Clock and move-ordering state for one call to [`choose_move`].
@@ -2108,7 +1841,7 @@ fn negamax_1v1(
     // one escape, or a cut this ply) extend instead of static eval.
     if depth <= 0 {
         if !wants_quiescence(state, our_id, opponent, qs_left, to_move, move_count) {
-            let score = eval_1v1(state, our_id, opponent, to_move, ply, scratch);
+            let score = eval_1v1(state, our_id, opponent, ply, scratch);
             return if to_move == our_id { score } else { -score };
         }
         depth = 1;
@@ -2199,7 +1932,6 @@ fn search_root_1v1(
     depth: i32,
     mut alpha: i32,
     beta: i32,
-    bonus: &[i32; 4],
     search: &mut Search,
     scratch: &mut Scratch,
 ) -> (u8, i32, bool) {
@@ -2209,26 +1941,21 @@ fn search_root_1v1(
         let old_col = state.head_x[our_id];
         let old_row = state.head_y[our_id];
         state.apply(our_id, moves[move_i] as usize);
-        // A per-move root bonus is a constant shift: shift the window instead.
-        let shift = bonus[moves[move_i] as usize];
-        let mut score = -negamax_1v1(
+        let score = -negamax_1v1(
             state,
             our_id,
             opponent,
             opponent,
             depth - 1,
             1,
-            -beta.saturating_sub(shift),
-            -alpha.saturating_sub(shift),
+            -beta,
+            -alpha,
             moves[move_i],
             NO_MOVE,
             QS_MAX,
             search,
             scratch,
         );
-        if score.abs() < MATE_SCORE - 1000 {
-            score += shift;
-        }
         state.undo_step(our_id, old_col, old_row);
         if search.timed_out {
             return (best_dir, best_score, false);
@@ -2294,20 +2021,8 @@ fn greedy_space_dir(
             state.head_x[player] as i32,
             state.head_y[player] as i32,
         );
-        // Optional pull away from the nearest other head (a land-grabbing
-        // rival spreads out rather than hugging the pack).
-        let away = params().g_away;
-        let mut nearest = 0;
-        if away > 0 {
-            nearest = 99;
-            for other in 0..state.player_count as usize {
-                if other != player && state.is_alive(other) {
-                    nearest = nearest.min(heads_manhattan(state, player, other));
-                }
-            }
-        }
         state.undo_step(player, old_col, old_row);
-        let score = space * 20 + hug + nearest * away;
+        let score = space * 20 + hug;
         if score > best {
             best = score;
             best_dir = moves[move_i];
@@ -2348,31 +2063,10 @@ fn paranoid_max(
     if move_count == 0 {
         return -MATE_SCORE + ply;
     }
-    // Leaf, unless we are down to one exit: then look one more round (up to
-    // `ffa_qs` rounds past the nominal depth) instead of trusting the eval of
-    // a bike that may be about to be boxed in.
-    if depth <= 0 && !(move_count == 1 && depth > -params().ffa_qs) {
-        return eval_ffa(state, our_id, threat, ply);
+    if depth <= 0 {
+        return eval_ffa(state, our_id, ply);
     }
     let player_count = state.player_count as usize;
-    // Dynamic gating: a rival that has come within `dyn_near` Manhattan steps
-    // inside the tree joins the Min seats (at most two Mins).
-    let mut threat = threat;
-    let dyn_near = params().dyn_near;
-    if dyn_near > 0 && (threat & state.alive_mask as usize).count_ones() < 2 {
-        let mut best = None;
-        for player in 0..player_count {
-            if player != our_id && state.is_alive(player) && threat & (1 << player) == 0 {
-                let d = heads_manhattan(state, our_id, player);
-                if d <= dyn_near && best.map_or(true, |(_, bd)| d < bd) {
-                    best = Some((player, d));
-                }
-            }
-        }
-        if let Some((player, _)) = best {
-            threat |= 1 << player;
-        }
-    }
     let mut target_col = state.head_x[our_id] as i32;
     let mut target_row = state.head_y[our_id] as i32;
     for player in 0..player_count {
@@ -2683,15 +2377,15 @@ fn choose_move(
     // if it is also within `near` steps — a bike squeezed between two
     // neighbours needs both of them to be taken seriously.
     let mut threat_mask = 1usize << opponent;
-    if !is_duel && params().near > 0 {
+    if !is_duel {
         let dist = rival_distances(state, our_id);
-        let mut extra = params().mins - 1;
+        let mut extra = FFA_MAX_MINS - 1;
         while extra > 0 {
             let mut next = None;
             for i in 0..other_count {
                 let rival = other_ids[i];
                 if threat_mask & (1 << rival) == 0
-                    && (dist[rival] as i32) <= params().near
+                    && dist[rival] <= FFA_NEAR_STEPS
                     && next.map_or(true, |(_, d)| dist[rival] < d)
                 {
                     next = Some((rival, dist[rival]));
@@ -2789,112 +2483,56 @@ fn choose_move(
         // branches; other bikes play one greedy space-keeping reply).
         let max_ffa_depth = 50;
         let player_count = state.player_count as usize;
-        // Optional long-horizon bonus per root move from a greedy land-grab
-        // rollout, centred on the mean so it only re-ranks moves.
-        let mut bonus = [0i32; 4];
-        if params().roll > 0 {
-            let mut raw = [0i32; 4];
-            let mut sum = 0i32;
-            for move_i in 0..move_count {
-                let mut child = *state;
-                child.apply(our_id, moves[move_i] as usize);
-                raw[moves[move_i] as usize] = ffa_rollout(&child, our_id, params().roll);
-                sum += raw[moves[move_i] as usize];
-            }
-            let mean = sum / move_count as i32;
-            for move_i in 0..move_count {
-                let dir = moves[move_i] as usize;
-                bonus[dir] = (raw[dir] - mean) * params().roll_w / 100;
-            }
-        }
-        let mut prev_score: Option<i32> = None;
         for depth in 1..=max_ffa_depth {
             if Instant::now() >= search.deadline {
                 break;
             }
-            // Aspiration: search inside a window around the previous depth’s
-            // score; on a fail (either edge) re-search full-window.
-            let mut window_alpha = -MATE_SCORE * 2;
-            let mut window_beta = MATE_SCORE * 2;
-            let asp = params().ffa_asp;
-            if let (Some(prev), true) = (prev_score, asp > 0) {
-                if prev.abs() < MATE_SCORE - 200 {
-                    window_alpha = prev.saturating_sub(asp);
-                    window_beta = prev.saturating_add(asp);
-                }
-            }
-            let mut iter_best_dir;
-            let mut iter_best_score;
+            let mut iter_best_dir = principal_dir;
+            let mut iter_best_score = -MATE_SCORE * 2;
             let mut completed_iteration = true;
-            let mut pass = 0;
-            loop {
-                iter_best_dir = principal_dir;
-                iter_best_score = -MATE_SCORE * 2;
-                let mut alpha = window_alpha;
-                order_moves(
+            order_moves(
+                state,
+                our_id,
+                &mut moves,
+                move_count,
+                principal_dir,
+                search.killers[0][0],
+                last_dir,
+                target_col,
+                target_row,
+                &search.history[our_id],
+            );
+            for move_i in 0..move_count {
+                let old_col = state.head_x[our_id];
+                let old_row = state.head_y[our_id];
+                state.apply(our_id, moves[move_i] as usize);
+                let score = paranoid_min(
                     state,
                     our_id,
-                    &mut moves,
-                    move_count,
-                    principal_dir,
-                    search.killers[0][0],
-                    last_dir,
-                    target_col,
-                    target_row,
-                    &search.history[our_id],
+                    next_seat(our_id, player_count),
+                    threat_mask,
+                    depth - 1,
+                    1,
+                    iter_best_score,
+                    MATE_SCORE * 2,
+                    &mut search,
+                    scratch,
                 );
-                for move_i in 0..move_count {
-                    let old_col = state.head_x[our_id];
-                    let old_row = state.head_y[our_id];
-                    state.apply(our_id, moves[move_i] as usize);
-                    let shift = bonus[moves[move_i] as usize];
-                    let mut score = paranoid_min(
-                        state,
-                        our_id,
-                        next_seat(our_id, player_count),
-                        threat_mask,
-                        depth - 1,
-                        1,
-                        alpha.saturating_sub(shift),
-                        window_beta.saturating_sub(shift),
-                        &mut search,
-                        scratch,
-                    );
-                    if !search.timed_out && score.abs() < MATE_SCORE - 1000 {
-                        score += shift;
-                    }
-                    state.undo_step(our_id, old_col, old_row);
-                    if search.timed_out {
-                        completed_iteration = false;
-                        break;
-                    }
-                    if score > iter_best_score {
-                        iter_best_score = score;
-                        iter_best_dir = moves[move_i];
-                    }
-                    if score > alpha {
-                        alpha = score;
-                    }
-                }
-                if !completed_iteration {
+                state.undo_step(our_id, old_col, old_row);
+                if search.timed_out {
+                    completed_iteration = false;
                     break;
                 }
-                let failed = window_alpha > -MATE_SCORE * 2
-                    && (iter_best_score <= window_alpha || iter_best_score >= window_beta);
-                if !failed || pass > 0 {
-                    break;
+                if score > iter_best_score {
+                    iter_best_score = score;
+                    iter_best_dir = moves[move_i];
                 }
-                pass += 1;
-                window_alpha = -MATE_SCORE * 2;
-                window_beta = MATE_SCORE * 2;
-                principal_dir = iter_best_dir;
             }
             if completed_iteration {
                 completed_depth = depth;
                 principal_dir = iter_best_dir;
                 best_dir = iter_best_dir;
                 best_score = iter_best_score;
-                prev_score = Some(iter_best_score);
                 if iter_best_score.abs() >= MATE_SCORE - 200 {
                     break;
                 }
@@ -2906,23 +2544,6 @@ fn choose_move(
         // 1v1: search as deep as time allows (cap 50). Depth 1 is full-window;
         // later depths aspirate around the previous score and re-search on fail.
         let max_depth = 50;
-        let mut bonus1 = [0i32; 4];
-        if params().roll1 > 0 {
-            let mut raw = [0i32; 4];
-            let mut sum = 0i32;
-            for move_i in 0..move_count {
-                let mut child = *state;
-                child.apply(our_id, moves[move_i] as usize);
-                raw[moves[move_i] as usize] =
-                    duel_rollout(&child, our_id, opponent, params().roll1, scratch);
-                sum += raw[moves[move_i] as usize];
-            }
-            let mean = sum / move_count as i32;
-            for move_i in 0..move_count {
-                let dir = moves[move_i] as usize;
-                bonus1[dir] = (raw[dir] - mean) * params().roll_w / 100;
-            }
-        }
         let mut prev_score: Option<i32> = None;
         for depth in 1..=max_depth {
             if Instant::now() >= search.deadline {
@@ -2963,7 +2584,6 @@ fn choose_move(
                     depth,
                     window_alpha,
                     window_beta,
-                    &bonus1,
                     &mut search,
                     scratch,
                 );
@@ -2998,7 +2618,6 @@ fn choose_move(
                     depth,
                     -MATE_SCORE * 2,
                     MATE_SCORE * 2,
-                    &bonus1,
                     &mut search,
                     scratch,
                 );
