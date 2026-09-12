@@ -102,6 +102,8 @@ struct Params {
     /// FFA root: rollout rounds (0 = off) and the bonus weight in percent.
     roll: i32,
     roll_w: i32,
+    /// 1v1 root: rollout rounds (0 = off); shares `roll_w`.
+    roll1: i32,
 }
 
 const DEFAULT_PARAMS: Params = Params {
@@ -130,6 +132,7 @@ const DEFAULT_PARAMS: Params = Params {
     f_front: 0,
     roll: 0,
     roll_w: 50,
+    roll1: 0,
 };
 
 static PARAMS: std::sync::OnceLock<Params> = std::sync::OnceLock::new();
@@ -169,6 +172,7 @@ fn params() -> &'static Params {
                     "f_front" => p.f_front = value,
                     "roll" => p.roll = value,
                     "roll_w" => p.roll_w = value,
+                    "roll1" => p.roll1 = value,
                     _ => {}
                 }
             }
@@ -1900,6 +1904,41 @@ fn ffa_rollout(state: &State, our_id: usize, rounds: i32) -> i32 {
     eval_ffa(&sim, our_id, 0, 0)
 }
 
+/// 1v1 rollout: both bikes play 1-ply [`eval_1v1`]-greedy for up to `rounds`
+/// rounds or until they are cut apart; returns our [`eval_1v1`] at the end.
+fn duel_rollout(state: &State, our_id: usize, opponent: usize, rounds: i32, scratch: &mut Scratch) -> i32 {
+    let mut sim = *state;
+    for _ in 0..rounds {
+        if !sim.is_alive(our_id) || !sim.is_alive(opponent) {
+            break;
+        }
+        if !shares_space(&sim, our_id, opponent) {
+            break;
+        }
+        for player in [opponent, our_id] {
+            let (moves, count) = sim.legal_moves(player);
+            if count == 0 {
+                sim.kill(player);
+                break;
+            }
+            let other = if player == our_id { opponent } else { our_id };
+            let mut best_dir = moves[0];
+            let mut best = i32::MIN;
+            for i in 0..count {
+                let mut child = sim;
+                child.apply(player, moves[i] as usize);
+                let score = eval_1v1(&child, player, other, other, 0, scratch);
+                if score > best {
+                    best = score;
+                    best_dir = moves[i];
+                }
+            }
+            sim.apply(player, best_dir as usize);
+        }
+    }
+    eval_1v1(&sim, our_id, opponent, our_id, 0, scratch)
+}
+
 /// Clock and move-ordering state for one call to [`choose_move`].
 ///
 /// `killers[ply % 64]` stores up to two direction indices that caused a beta
@@ -2160,6 +2199,7 @@ fn search_root_1v1(
     depth: i32,
     mut alpha: i32,
     beta: i32,
+    bonus: &[i32; 4],
     search: &mut Search,
     scratch: &mut Scratch,
 ) -> (u8, i32, bool) {
@@ -2169,21 +2209,26 @@ fn search_root_1v1(
         let old_col = state.head_x[our_id];
         let old_row = state.head_y[our_id];
         state.apply(our_id, moves[move_i] as usize);
-        let score = -negamax_1v1(
+        // A per-move root bonus is a constant shift: shift the window instead.
+        let shift = bonus[moves[move_i] as usize];
+        let mut score = -negamax_1v1(
             state,
             our_id,
             opponent,
             opponent,
             depth - 1,
             1,
-            -beta,
-            -alpha,
+            -beta.saturating_sub(shift),
+            -alpha.saturating_sub(shift),
             moves[move_i],
             NO_MOVE,
             QS_MAX,
             search,
             scratch,
         );
+        if score.abs() < MATE_SCORE - 1000 {
+            score += shift;
+        }
         state.undo_step(our_id, old_col, old_row);
         if search.timed_out {
             return (best_dir, best_score, false);
@@ -2861,6 +2906,23 @@ fn choose_move(
         // 1v1: search as deep as time allows (cap 50). Depth 1 is full-window;
         // later depths aspirate around the previous score and re-search on fail.
         let max_depth = 50;
+        let mut bonus1 = [0i32; 4];
+        if params().roll1 > 0 {
+            let mut raw = [0i32; 4];
+            let mut sum = 0i32;
+            for move_i in 0..move_count {
+                let mut child = *state;
+                child.apply(our_id, moves[move_i] as usize);
+                raw[moves[move_i] as usize] =
+                    duel_rollout(&child, our_id, opponent, params().roll1, scratch);
+                sum += raw[moves[move_i] as usize];
+            }
+            let mean = sum / move_count as i32;
+            for move_i in 0..move_count {
+                let dir = moves[move_i] as usize;
+                bonus1[dir] = (raw[dir] - mean) * params().roll_w / 100;
+            }
+        }
         let mut prev_score: Option<i32> = None;
         for depth in 1..=max_depth {
             if Instant::now() >= search.deadline {
@@ -2901,6 +2963,7 @@ fn choose_move(
                     depth,
                     window_alpha,
                     window_beta,
+                    &bonus1,
                     &mut search,
                     scratch,
                 );
@@ -2935,6 +2998,7 @@ fn choose_move(
                     depth,
                     -MATE_SCORE * 2,
                     MATE_SCORE * 2,
+                    &bonus1,
                     &mut search,
                     scratch,
                 );

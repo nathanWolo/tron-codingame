@@ -398,6 +398,7 @@ fn profile() {
                 depth,
                 -MATE_SCORE * 2,
                 MATE_SCORE * 2,
+                &[0; 4],
                 &mut search,
                 &mut scratch,
             );
@@ -636,6 +637,7 @@ fn eval_board() {
                 depth,
                 -MATE_SCORE * 2,
                 MATE_SCORE * 2,
+                &[0; 4],
                 &mut search,
                 &mut scratch,
             );
