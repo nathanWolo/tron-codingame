@@ -89,6 +89,8 @@ struct Params {
     mins: i32,
     /// FFA: percent of the Min seats’ own survival score subtracted from ours.
     lam: i32,
+    /// FFA aspiration half-window (0 = full-window every depth).
+    ffa_asp: i32,
 }
 
 const DEFAULT_PARAMS: Params = Params {
@@ -107,9 +109,10 @@ const DEFAULT_PARAMS: Params = Params {
     doom: 40,
     fill: 60,
     fill_sign: 80,
-    near: 0,
+    near: 12,
     mins: 2,
     lam: 0,
+    ffa_asp: 0,
 };
 
 static PARAMS: std::sync::OnceLock<Params> = std::sync::OnceLock::new();
@@ -142,6 +145,7 @@ fn params() -> &'static Params {
                     "near" => p.near = value,
                     "mins" => p.mins = value,
                     "lam" => p.lam = value,
+                    "ffa_asp" => p.ffa_asp = value,
                     _ => {}
                 }
             }
@@ -2618,56 +2622,90 @@ fn choose_move(
         // branches; other bikes play one greedy space-keeping reply).
         let max_ffa_depth = 50;
         let player_count = state.player_count as usize;
+        let mut prev_score: Option<i32> = None;
         for depth in 1..=max_ffa_depth {
             if Instant::now() >= search.deadline {
                 break;
             }
-            let mut iter_best_dir = principal_dir;
-            let mut iter_best_score = -MATE_SCORE * 2;
+            // Aspiration: search inside a window around the previous depth’s
+            // score; on a fail (either edge) re-search full-window.
+            let mut window_alpha = -MATE_SCORE * 2;
+            let mut window_beta = MATE_SCORE * 2;
+            let asp = params().ffa_asp;
+            if let (Some(prev), true) = (prev_score, asp > 0) {
+                if prev.abs() < MATE_SCORE - 200 {
+                    window_alpha = prev.saturating_sub(asp);
+                    window_beta = prev.saturating_add(asp);
+                }
+            }
+            let mut iter_best_dir;
+            let mut iter_best_score;
             let mut completed_iteration = true;
-            order_moves(
-                state,
-                our_id,
-                &mut moves,
-                move_count,
-                principal_dir,
-                search.killers[0][0],
-                last_dir,
-                target_col,
-                target_row,
-                &search.history[our_id],
-            );
-            for move_i in 0..move_count {
-                let old_col = state.head_x[our_id];
-                let old_row = state.head_y[our_id];
-                state.apply(our_id, moves[move_i] as usize);
-                let score = paranoid_min(
+            let mut pass = 0;
+            loop {
+                iter_best_dir = principal_dir;
+                iter_best_score = -MATE_SCORE * 2;
+                let mut alpha = window_alpha;
+                order_moves(
                     state,
                     our_id,
-                    next_seat(our_id, player_count),
-                    threat_mask,
-                    depth - 1,
-                    1,
-                    iter_best_score,
-                    MATE_SCORE * 2,
-                    &mut search,
-                    scratch,
+                    &mut moves,
+                    move_count,
+                    principal_dir,
+                    search.killers[0][0],
+                    last_dir,
+                    target_col,
+                    target_row,
+                    &search.history[our_id],
                 );
-                state.undo_step(our_id, old_col, old_row);
-                if search.timed_out {
-                    completed_iteration = false;
+                for move_i in 0..move_count {
+                    let old_col = state.head_x[our_id];
+                    let old_row = state.head_y[our_id];
+                    state.apply(our_id, moves[move_i] as usize);
+                    let score = paranoid_min(
+                        state,
+                        our_id,
+                        next_seat(our_id, player_count),
+                        threat_mask,
+                        depth - 1,
+                        1,
+                        alpha,
+                        window_beta,
+                        &mut search,
+                        scratch,
+                    );
+                    state.undo_step(our_id, old_col, old_row);
+                    if search.timed_out {
+                        completed_iteration = false;
+                        break;
+                    }
+                    if score > iter_best_score {
+                        iter_best_score = score;
+                        iter_best_dir = moves[move_i];
+                    }
+                    if score > alpha {
+                        alpha = score;
+                    }
+                }
+                if !completed_iteration {
                     break;
                 }
-                if score > iter_best_score {
-                    iter_best_score = score;
-                    iter_best_dir = moves[move_i];
+                let failed = window_alpha > -MATE_SCORE * 2
+                    && (iter_best_score <= window_alpha || iter_best_score >= window_beta);
+                if !failed || pass > 0 {
+                    break;
                 }
+                pass += 1;
+                window_alpha = -MATE_SCORE * 2;
+                window_beta = MATE_SCORE * 2;
+                principal_dir = iter_best_dir;
             }
             if completed_iteration {
                 completed_depth = depth;
                 principal_dir = iter_best_dir;
                 best_dir = iter_best_dir;
                 best_score = iter_best_score;
+                prev_score = Some(iter_best_score);
                 if iter_best_score.abs() >= MATE_SCORE - 200 {
                     break;
                 }
