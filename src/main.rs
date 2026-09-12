@@ -91,6 +91,10 @@ struct Params {
     lam: i32,
     /// FFA aspiration half-window (0 = full-window every depth).
     ffa_asp: i32,
+    /// FFA: extra rounds searched past the horizon while we have one exit.
+    ffa_qs: i32,
+    /// FFA greedy rival model: per Manhattan step from the nearest other head.
+    g_away: i32,
 }
 
 const DEFAULT_PARAMS: Params = Params {
@@ -113,6 +117,8 @@ const DEFAULT_PARAMS: Params = Params {
     mins: 2,
     lam: 0,
     ffa_asp: 0,
+    ffa_qs: 0,
+    g_away: 0,
 };
 
 static PARAMS: std::sync::OnceLock<Params> = std::sync::OnceLock::new();
@@ -146,6 +152,8 @@ fn params() -> &'static Params {
                     "mins" => p.mins = value,
                     "lam" => p.lam = value,
                     "ffa_asp" => p.ffa_asp = value,
+                    "ffa_qs" => p.ffa_qs = value,
+                    "g_away" => p.g_away = value,
                     _ => {}
                 }
             }
@@ -2160,8 +2168,20 @@ fn greedy_space_dir(
             state.head_x[player] as i32,
             state.head_y[player] as i32,
         );
+        // Optional pull away from the nearest other head (a land-grabbing
+        // rival spreads out rather than hugging the pack).
+        let away = params().g_away;
+        let mut nearest = 0;
+        if away > 0 {
+            nearest = 99;
+            for other in 0..state.player_count as usize {
+                if other != player && state.is_alive(other) {
+                    nearest = nearest.min(heads_manhattan(state, player, other));
+                }
+            }
+        }
         state.undo_step(player, old_col, old_row);
-        let score = space * 20 + hug;
+        let score = space * 20 + hug + nearest * away;
         if score > best {
             best = score;
             best_dir = moves[move_i];
@@ -2198,12 +2218,15 @@ fn paranoid_max(
     if state.alive_mask.count_ones() == 1 {
         return MATE_SCORE - ply;
     }
-    if depth <= 0 {
-        return eval_ffa(state, our_id, threat, ply);
-    }
     let (mut moves, move_count) = state.legal_moves(our_id);
     if move_count == 0 {
         return -MATE_SCORE + ply;
+    }
+    // Leaf, unless we are down to one exit: then look one more round (up to
+    // `ffa_qs` rounds past the nominal depth) instead of trusting the eval of
+    // a bike that may be about to be boxed in.
+    if depth <= 0 && !(move_count == 1 && depth > -params().ffa_qs) {
+        return eval_ffa(state, our_id, threat, ply);
     }
     let player_count = state.player_count as usize;
     let mut target_col = state.head_x[our_id] as i32;

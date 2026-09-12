@@ -497,6 +497,8 @@ FFA uses **mixed paranoid search**. We maximize `eval_ffa`. The closest living r
 
 `compute_voronoi_ffa` floods only our own component: a rival whose empty head-neighbours all lie inside it has exactly the same `reachable`, one touching a cell outside is flooded separately, one touching none has 0. Same claim loop as `compute_voronoi_ex`; the FFA leaf is ~1.7× faster and the greedy space-keeping reply uses row-bitboard floods instead of a cell BFS.
 
+Other 4p ideas measured against the two-Min build (+32 / +25 on two seeds) in the same 1600-game paired setup — none kept: Min seats also weighing their own survival (`score −= λ·mean(rival score)`, λ=0.4: identical games, λ=0.8: +1), aspiration windows in the FFA iterative deepening (±16000: +20, ±4000: +22), extending the horizon while we have one exit (2 rounds: −2, 4 rounds: +3), greedy rivals pulled away from the nearest head (+3 / step: −3, +10: +6). Note the spread: 4p games are chaotic enough that a 1600-game run has σ≈10 Elo and two *variants* differ by σ≈14, so single screens only catch ±20 effects.
+
 Two things that did **not** help in 4p (same 1600-game paired setup, vs +11 for plain doom-40): switching to the primed greedy fill when no rival shares our component (−8; with the rollout killing doomed rivals at their fill length, +8), and dropping the Min player when nobody can reach us (+9). The paranoid search already sees rivals run out of moves and vanish inside its horizon.
 
 When only two remain, the game becomes the 1v1 path (minimax + endgame fill). Dead players’ trails are already gone, so the board opens up — that is unique to this CodinGame ruleset.
