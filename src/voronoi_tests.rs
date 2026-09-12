@@ -421,8 +421,8 @@ fn voronoi_gap(state: &State) -> Option<String> {
                 state.head_x[1] as i32,
                 state.head_y[1] as i32,
             );
-            fill_diff.signum() * 80
-                + fill_diff * 60
+            fill_diff.signum() * params().fill_sign
+                + fill_diff * params().fill
                 + hug * 5
                 + (mobility(state, 0) - mobility(state, 1))
         } else {

@@ -79,6 +79,9 @@ struct Params {
     f_edges: i32,
     f_mob: i32,
     doom: i32,
+    /// 1v1 cut leaf: eval units per fill cell and the win/loss contempt.
+    fill: i32,
+    fill_sign: i32,
 }
 
 const DEFAULT_PARAMS: Params = Params {
@@ -95,6 +98,8 @@ const DEFAULT_PARAMS: Params = Params {
     f_edges: 12,
     f_mob: 20,
     doom: 40,
+    fill: 60,
+    fill_sign: 80,
 };
 
 static PARAMS: std::sync::OnceLock<Params> = std::sync::OnceLock::new();
@@ -122,6 +127,8 @@ fn params() -> &'static Params {
                     "f_edges" => p.f_edges = value,
                     "f_mob" => p.f_mob = value,
                     "doom" => p.doom = value,
+                    "fill" => p.fill = value,
+                    "fill_sign" => p.fill_sign = value,
                     _ => {}
                 }
             }
@@ -1597,8 +1604,11 @@ fn eval_1v1(
         let fill_diff = our_fill - opp_fill;
         let hug = wall_neighbor_count(state, our_col, our_row)
             - wall_neighbor_count(state, opp_col, opp_row);
-        let score =
-            fill_diff.signum() * 80 + fill_diff * 60 + hug * 5 + (our_mobility - opp_mobility);
+        let p = params();
+        let score = fill_diff.signum() * p.fill_sign
+            + fill_diff * p.fill
+            + hug * 5
+            + (our_mobility - opp_mobility);
         // Remember this cut position so a later, deeper iteration can stop
         // here instead of expanding two independent chambers.
         let slot = (state.hash >> (64 - CUT_CACHE_BITS)) as usize;
