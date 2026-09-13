@@ -45,7 +45,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -214,6 +214,7 @@ class GameResult:
     dev_ms: int = 0
     base_nodes: int = 0
     base_ms: int = 0
+    moves: list = field(default_factory=list)
 
 
 def parse_search_stats(line: str) -> tuple[int, int]:
@@ -267,6 +268,7 @@ class Engine:
         self.label = label
         self.nodes = 0
         self.ms = 0
+        self.last_line = ""
         if err_dir is not None:
             err_dir.mkdir(parents=True, exist_ok=True)
             self._err_file = open(err_dir / f"{label}.stderr", "w", encoding="utf-8")
@@ -316,6 +318,7 @@ class Engine:
 
     def _on_stderr_line(self, line: str) -> None:
         """Hook for the watcher to keep the last `DIR mm …` stderr line."""
+        self.last_line = line
 
     def send(self, text: str) -> None:
         assert self.proc.stdin is not None
@@ -538,6 +541,15 @@ def play_game(
         occ[ny][nx] = True
         head[p] = (nx, ny)
         trails[p].append((nx, ny))
+        info = ""
+        toks = engines[p].last_line.split()
+        if len(toks) >= 3 and toks[1] == "mm":
+            info = ":" + toks[2]
+            for t in toks[3:]:
+                if t.startswith("d="):
+                    info += ":" + t[2:]
+        engines[p].last_line = ""
+        all_moves.append(f"{p}{token[0]}{info}")
         return True
 
     def query(p: int) -> Optional[str]:
@@ -558,6 +570,7 @@ def play_game(
 
     turns = 0
     reason = "unknown"
+    all_moves: list[str] = []
     winner: Optional[int] = None
     tied: list[int] = []
     try:
@@ -663,6 +676,7 @@ def play_game(
         dev_ms=dev_ms,
         base_nodes=base_nodes,
         base_ms=base_ms,
+        moves=all_moves,
     )
 
 
