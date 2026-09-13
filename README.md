@@ -181,6 +181,8 @@ tools/sprt.sh                   # default: H0=0 Elo, H1=+10 Elo, α=β=0.05, 20 
 | 1v1 SPRT `[0, 10]`, 20 ms (fused duel Voronoi alone) | **ACCEPT H1** | 7474 | 51.4% vs 50% | **+9.8 ± 4.0** |
 | 1v1 SPRT `[0, 10]`, 20 ms (this exact freeze) | inconclusive at max games (LOS 98.9%) | 10000 | 51.1% vs 50% | **+8.0 ± 3.5** |
 | 4p SPRT `[0, 20]`, 20 ms (1 vs 3; + FFA leaf, doom projection, second Min) | **ACCEPT H1** | 3908 | 26.7% vs 25% | **+15.8 ± 6.3** |
+| 1v1 fixed, **95 ms** (CodinGame budget) | — | 600 | 49.7% | −2.3 ± 14.2 |
+| 4p fixed, **95 ms** | — | 600 | 29.0% vs 25% | **+35.3 ± 15.6** |
 
 ### Earlier SPRTs (previous freezes)
 
