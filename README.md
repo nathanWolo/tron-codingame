@@ -183,6 +183,7 @@ tools/sprt.sh                   # default: H0=0 Elo, H1=+10 Elo, α=β=0.05, 20 
 | 4p SPRT `[0, 20]`, 20 ms (1 vs 3; + FFA leaf, doom projection, second Min) | **ACCEPT H1** | 3908 | 26.7% vs 25% | **+15.8 ± 6.3** |
 | 1v1 fixed, **95 ms** (CodinGame budget) | — | 600 | 49.7% | −2.3 ± 14.2 |
 | 4p fixed, **95 ms** | — | 600 | 29.0% vs 25% | **+35.3 ± 15.6** |
+| 4p SPRT `[0, 30]`, **95 ms** | **ACCEPT H1** | 732 | 28.8% vs 25% | **+33.8 ± 14.2** |
 
 ### Earlier SPRTs (previous freezes)
 
