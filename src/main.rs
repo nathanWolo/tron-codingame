@@ -1120,57 +1120,54 @@ fn compute_voronoi_ffa_ex(state: &State, our_id: usize, doomed: u8) -> Voronoi {
     let mut owned = [[0u32; 20]; MAX_PLAYERS];
     let mut frontier = seeds;
     let mut claimed = [0u32; 20];
+    // Living seats, packed once so the wave loop does not re-test alive bits.
+    let mut seats = [0usize; MAX_PLAYERS];
+    let mut seat_count = 0;
+    for player in 0..player_count {
+        if is_alive(player) {
+            seats[seat_count] = player;
+            seat_count += 1;
+        }
+    }
     loop {
         let mut union = [0u32; 20];
         let mut multi = [0u32; 20];
-        let mut any = false;
-        for player in 0..player_count {
-            if !is_alive(player) {
-                continue;
-            }
+        let mut any = 0u32;
+        for &player in &seats[..seat_count] {
+            let front = &mut frontier[player];
             for row in 0..20 {
-                let cells = frontier[player][row] & !claimed[row];
-                frontier[player][row] = cells;
-                if cells != 0 {
-                    any = true;
-                }
+                let cells = front[row] & !claimed[row];
+                front[row] = cells;
+                any |= cells;
                 multi[row] |= cells & union[row];
                 union[row] |= cells;
             }
         }
-        if !any {
+        if any == 0 {
             break;
         }
-        for player in 0..player_count {
-            if !is_alive(player) {
-                continue;
-            }
+        for &player in &seats[..seat_count] {
+            let front = &frontier[player];
+            let own = &mut owned[player];
             for row in 0..20 {
-                owned[player][row] |= frontier[player][row] & !multi[row];
+                own[row] |= front[row] & !multi[row];
             }
         }
         for row in 0..20 {
             claimed[row] |= union[row];
         }
-        let mut next = [[0u32; 20]; MAX_PLAYERS];
-        for player in 0..player_count {
-            if !is_alive(player) {
-                continue;
-            }
-            next[player] = expand_mask(&frontier[player], &empty);
+        for &player in &seats[..seat_count] {
+            frontier[player] = expand_mask(&frontier[player], &empty);
         }
-        frontier = next;
     }
 
     let mut territory = [0i32; MAX_PLAYERS];
     let mut edge_sum = [0i32; MAX_PLAYERS];
-    for player in 0..player_count {
-        if !is_alive(player) {
-            continue;
-        }
+    for &player in &seats[..seat_count] {
         territory[player] = mask_popcount(&owned[player]);
-        edge_sum[player] = mask_edge_sum(&owned[player], &empty);
     }
+    // Only our own edge sum is scored.
+    edge_sum[our_id] = mask_edge_sum(&owned[our_id], &empty);
     Voronoi {
         territory,
         edge_sum,
