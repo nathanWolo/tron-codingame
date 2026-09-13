@@ -172,7 +172,7 @@ tools/sprt.sh                   # default: H0=0 Elo, H1=+10 Elo, α=β=0.05, 20 
 
 ### Frozen baseline
 
-`bin/tron-baseline` is gitignored and matches this `src/main.rs`: fused claim-based duel Voronoi (no reach term), cut cache, FFA leaf with one flood plus doom projection (40 cells), distance-gated second Min (12 steps, max two Mins), mate scores from the side to move, checkerboard fill bound, 1v1 quiescence (up to 4 extra plies) and aspiration windows (`±16000`), iterative deepening cap 50, primed greedy fill **to completion** after a 1v1 cut, FFA opening center bias (same `(14,9)` pull as 1v1). Freeze it with `tools/save_baseline.sh` or `tools/save_baseline.cmd`. New patches SPRT against that file; Elo 0 means “as strong as this freeze.”
+`bin/tron-baseline` is gitignored and matches this `src/main.rs`: fused claim-based duel Voronoi (no reach term), cut cache, FFA leaf with one flood, a packed claim loop and our edge sum only (≈2.6× the old FFA leaf speed) plus doom projection (40 cells), distance-gated second Min (12 steps, max two Mins), mate scores from the side to move, checkerboard fill bound, 1v1 quiescence (up to 4 extra plies) and aspiration windows (`±16000`), iterative deepening cap 50, primed greedy fill **to completion** after a 1v1 cut, FFA opening center bias (same `(14,9)` pull as 1v1). Freeze it with `tools/save_baseline.sh` or `tools/save_baseline.cmd`. New patches SPRT against that file; Elo 0 means “as strong as this freeze.”
 
 ### This freeze vs the previous one (commit `34405b9`)
 
@@ -180,7 +180,8 @@ tools/sprt.sh                   # default: H0=0 Elo, H1=+10 Elo, α=β=0.05, 20 
 |-------|----------|---|-------|-----|
 | 1v1 SPRT `[0, 10]`, 20 ms (fused duel Voronoi alone) | **ACCEPT H1** | 7474 | 51.4% vs 50% | **+9.8 ± 4.0** |
 | 1v1 SPRT `[0, 10]`, 20 ms (this exact freeze) | inconclusive at max games (LOS 98.9%) | 10000 | 51.1% vs 50% | **+8.0 ± 3.5** |
-| 4p SPRT `[0, 20]`, 20 ms (1 vs 3; + FFA leaf, doom projection, second Min) | **ACCEPT H1** | 3908 | 26.7% vs 25% | **+15.8 ± 6.3** |
+| 4p SPRT `[0, 20]`, 20 ms (1 vs 3; + FFA leaf, doom projection, second Min) | **ACCEPT H1** | 3908 | 26.7% vs 25% | +15.8 ± 6.3 |
+| 4p SPRT `[0, 20]`, 20 ms (this exact freeze: + 1.5× faster FFA leaf) | **ACCEPT H1** | 2392 | 27.3% vs 25% | **+20.3 ± 8.0** |
 | 1v1 fixed, **95 ms** (CodinGame budget) | — | 600 + 1400 | 49.7% / 50.5% | −2.3 ± 14.2 / +3.5 ± 9.3 |
 | 4p fixed, **95 ms** | — | 600 | 29.0% vs 25% | **+35.3 ± 15.6** |
 | 4p SPRT `[0, 30]`, **95 ms** | **ACCEPT H1** | 732 | 28.8% vs 25% | **+33.8 ± 14.2** |
