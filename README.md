@@ -185,6 +185,7 @@ tools/sprt.sh                   # default: H0=0 Elo, H1=+10 Elo, α=β=0.05, 20 
 | 4p fixed, **95 ms** | — | 600 | 29.0% vs 25% | **+35.3 ± 15.6** |
 | 4p SPRT `[0, 30]`, **95 ms** | **ACCEPT H1** | 732 | 28.8% vs 25% | **+33.8 ± 14.2** |
 | 4p fixed, **95 ms** | — | 2000 | 28.1% vs 25% | **+27.2 ± 8.6** |
+| 3p fixed, 20 ms (1 vs 2) | — | 900 | 36.9% vs 33.3% | +27.1 ± 12.0 |
 
 At the CodinGame budget the 4p changes are worth roughly +27–34 Elo (about 28% first places against three copies of the old freeze); at 20 ms about +16. The 1v1 change is a speed-up and is worth ~+8–10 at 20 ms and within noise at 95 ms.
 
