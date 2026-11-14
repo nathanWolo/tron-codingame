@@ -1,0 +1,53 @@
+config {'channels': '16,24,24', 'hidden': 96, 'seed': 0, 'sims': 64, 'samples_per_gen': 200000, 'threads': 14, 'temp_plies': 20, 'noise_eps': 0.25, 'noise_alpha': 0.5, 'c_puct': 1.0, 'batch': 512, 'reuse': 4.0, 'lr': 0.001, 'weight_decay': 0.0001, 'capacity': 1500000, 'window_frac': 0.4, 'min_window': 200000, 'q_mix': 0.0, 'eval_every': 5, 'eval_pairs': 200, 'gens': 100000}
+parameters 102885, starting at generation 0
+gen    1 |   0.15M pos | 800 games, 182 plies, p0 0.46, crash 29 | pol 0.870 (H 0.814) val 0.860 acc 0.645 | sp 25s dist 2s train 13s
+gen    2 |   0.31M pos | 1101 games, 145 plies, p0 0.50, crash 13 | pol 0.862 (H 0.788) val 0.592 acc 0.787 | sp 28s dist 1s train 12s
+gen    3 |   0.51M pos | 1377 games, 146 plies, p0 0.52, crash 22 | pol 0.824 (H 0.756) val 0.352 acc 0.882 | sp 36s dist 2s train 3614s
+gen    4 |   0.71M pos | 1371 games, 147 plies, p0 0.53, crash 22 | pol 0.789 (H 0.719) val 0.342 acc 0.884 | sp -3568s dist 2s train 16s
+gen    5 |   0.93M pos | 1356 games, 161 plies, p0 0.51, crash 14 | pol 0.751 (H 0.688) val 0.355 acc 0.878 | sp 38s dist 2s train 17s | vs gen 0: 0.900
+gen    6 |   1.14M pos | 1242 games, 174 plies, p0 0.52, crash 23 | pol 0.719 (H 0.659) val 0.402 acc 0.861 | sp 38s dist 2s train 17s
+gen    7 |   1.33M pos | 1151 games, 164 plies, p0 0.51, crash 20 | pol 0.702 (H 0.644) val 0.405 acc 0.858 | sp 3631s dist -3597s train 3613s
+STOP file found, exiting
+config {'channels': '16,24,24', 'hidden': 96, 'seed': 0, 'sims': 64, 'samples_per_gen': 200000, 'threads': 14, 'temp_plies': 20, 'noise_eps': 0.25, 'noise_alpha': 0.5, 'c_puct': 1.0, 'batch': 512, 'reuse': 4.0, 'lr': 0.001, 'weight_decay': 0.0001, 'capacity': 1500000, 'window_frac': 0.4, 'min_window': 200000, 'q_mix': 0.0, 'eval_every': 5, 'eval_pairs': 200, 'base_every': 10, 'base_pairs': 100, 'base_budget_ms': 20, 'base_threads': 8, 'gens': 100000}
+parameters 102885, starting at generation 7
+refilled the ring with 1331197 positions from 7 files
+gen    8 |   1.53M pos | 1218 games, 167 plies, p0 0.52, crash 11 | pol 0.688 (H 0.630) val 0.396 acc 0.862 | sp 34s dist 2s train 17s
+gen    9 |   1.74M pos | 1195 games, 174 plies, p0 0.51, crash 20 | pol 0.681 (H 0.625) val 0.393 acc 0.863 | sp 36s dist 2s train 17s
+gen   10 |   1.94M pos | 1145 games, 176 plies, p0 0.52, crash 21 | pol 0.674 (H 0.619) val 0.386 acc 0.864 | sp 30s dist 2s train 15s | vs gen 0: 0.890 | vs alpha-beta @20ms: 0.625 +/- 0.067
+gen   11 |   2.15M pos | 1139 games, 177 plies, p0 0.48, crash 26 | pol 0.665 (H 0.611) val 0.385 acc 0.866 | sp 35s dist 2s train 16s
+gen   12 |   2.34M pos | 1130 games, 176 plies, p0 0.50, crash 30 | pol 0.659 (H 0.606) val 0.398 acc 0.861 | sp 35s dist 2s train 16s
+gen   13 |   2.54M pos | 1135 games, 174 plies, p0 0.51, crash 39 | pol 0.656 (H 0.603) val 0.404 acc 0.859 | sp 40s dist 2s train 16s
+gen   14 |   2.75M pos | 1146 games, 178 plies, p0 0.51, crash 32 | pol 0.651 (H 0.598) val 0.400 acc 0.860 | sp 31s dist 2s train 18s
+gen   15 |   2.95M pos | 1120 games, 177 plies, p0 0.51, crash 26 | pol 0.647 (H 0.594) val 0.387 acc 0.865 | sp 30s dist 2s train 15s | vs gen 5: 0.542
+gen   16 |   3.14M pos | 1128 games, 172 plies, p0 0.54, crash 13 | pol 0.646 (H 0.594) val 0.387 acc 0.865 | sp 29s dist 1s train 14s
+gen   17 |   3.35M pos | 1166 games, 178 plies, p0 0.52, crash 20 | pol 0.648 (H 0.596) val 0.380 acc 0.867 | sp 31s dist 1s train 16s
+gen   18 |   3.57M pos | 1123 games, 195 plies, p0 0.50, crash 30 | pol 0.643 (H 0.590) val 0.374 acc 0.869 | sp 34s dist 2s train 17s
+gen   19 |   3.76M pos | 1024 games, 190 plies, p0 0.49, crash 30 | pol 0.642 (H 0.590) val 0.370 acc 0.871 | sp 29s dist 1s train 14s
+gen   20 |   3.95M pos | 1055 games, 183 plies, p0 0.52, crash 28 | pol 0.641 (H 0.589) val 0.360 acc 0.875 | sp 28s dist 1s train 14s | vs gen 10: 0.547 | vs alpha-beta @20ms: 0.650 +/- 0.066
+gen   21 |   4.15M pos | 1093 games, 184 plies, p0 0.50, crash 26 | pol 0.642 (H 0.591) val 0.355 acc 0.877 | sp 30s dist 1s train 15s
+gen   22 |   4.34M pos | 1084 games, 174 plies, p0 0.49, crash 34 | pol 0.641 (H 0.590) val 0.363 acc 0.875 | sp 27s dist 1s train 16s
+gen   23 |   4.56M pos | 1149 games, 191 plies, p0 0.48, crash 41 | pol 0.639 (H 0.589) val 0.368 acc 0.873 | sp 31s dist 2s train 16s
+gen   24 |   4.76M pos | 1044 games, 187 plies, p0 0.51, crash 37 | pol 0.638 (H 0.587) val 0.364 acc 0.876 | sp 30s dist 1s train 17s
+gen   25 |   4.95M pos | 1071 games, 177 plies, p0 0.51, crash 29 | pol 0.638 (H 0.589) val 0.362 acc 0.876 | sp 28s dist 1s train 16s | vs gen 15: 0.497
+gen   26 |   5.14M pos | 1128 games, 171 plies, p0 0.53, crash 33 | pol 0.642 (H 0.592) val 0.361 acc 0.876 | sp 29s dist 1s train 16s
+STOP file found, exiting
+config {'channels': '16,24,24', 'hidden': 96, 'seed': 0, 'sims': 64, 'samples_per_gen': 200000, 'threads': 14, 'temp_plies': 20, 'noise_eps': 0.25, 'noise_alpha': 0.5, 'c_puct': 1.0, 'batch': 512, 'reuse': 4.0, 'lr': 0.0003, 'weight_decay': 0.0001, 'capacity': 1500000, 'window_frac': 0.4, 'min_window': 200000, 'q_mix': 0.0, 'eval_every': 5, 'eval_pairs': 400, 'base_every': 20, 'base_pairs': 100, 'base_budget_ms': 100, 'base_threads': 8, 'gens': 100000}
+parameters 102885, starting at generation 26
+refilled the ring with 1500000 positions from 8 files
+gen   27 |   5.34M pos | 1167 games, 169 plies, p0 0.51, crash 34 | pol 0.643 (H 0.595) val 0.353 acc 0.880 | sp 30s dist 2s train 17s
+gen   28 |   5.56M pos | 1184 games, 186 plies, p0 0.51, crash 38 | pol 0.640 (H 0.592) val 0.355 acc 0.880 | sp 33s dist 2s train 17s
+gen   29 |   5.75M pos | 1072 games, 179 plies, p0 0.51, crash 36 | pol 0.638 (H 0.590) val 0.356 acc 0.879 | sp 36s dist 2s train 15s
+gen   30 |   5.95M pos | 1117 games, 182 plies, p0 0.52, crash 42 | pol 0.638 (H 0.590) val 0.352 acc 0.880 | sp 38s dist 2s train 16s | vs gen 20: 0.511 (pairs 34-341-25)
+gen   31 |   6.15M pos | 1100 games, 177 plies, p0 0.53, crash 33 | pol 0.640 (H 0.593) val 0.348 acc 0.881 | sp 37s dist 1s train 16s
+gen   32 |   6.35M pos | 1131 games, 178 plies, p0 0.50, crash 37 | pol 0.638 (H 0.591) val 0.361 acc 0.876 | sp 37s dist 2s train 17s
+gen   33 |   6.54M pos | 1122 games, 171 plies, p0 0.53, crash 23 | pol 0.638 (H 0.591) val 0.361 acc 0.876 | sp 36s dist 1s train 15s
+gen   34 |   6.75M pos | 1167 games, 178 plies, p0 0.52, crash 45 | pol 0.636 (H 0.589) val 0.352 acc 0.880 | sp 38s dist 2s train 17s
+gen   35 |   6.95M pos | 1125 games, 181 plies, p0 0.53, crash 27 | pol 0.634 (H 0.588) val 0.351 acc 0.880 | sp 38s dist 2s train 17s | vs gen 25: 0.521 (pairs 41-335-24)
+gen   36 |   7.15M pos | 1104 games, 182 plies, p0 0.51, crash 26 | pol 0.635 (H 0.589) val 0.351 acc 0.881 | sp 37s dist 2s train 16s
+gen   37 |   7.36M pos | 1101 games, 186 plies, p0 0.51, crash 31 | pol 0.635 (H 0.589) val 0.351 acc 0.880 | sp 43s dist 2s train 16s
+gen   38 |   7.56M pos | 1076 games, 190 plies, p0 0.51, crash 34 | pol 0.633 (H 0.587) val 0.347 acc 0.883 | sp 38s dist 2s train 16s
+gen   39 |   7.75M pos | 1054 games, 180 plies, p0 0.52, crash 31 | pol 0.633 (H 0.587) val 0.346 acc 0.882 | sp 36s dist 1s train 15s
+gen   40 |   7.96M pos | 1107 games, 189 plies, p0 0.51, crash 43 | pol 0.630 (H 0.583) val 0.345 acc 0.883 | sp 32s dist 1s train 16s | vs gen 30: 0.512 (pairs 36-338-26) | vs alpha-beta @100ms: 0.620 (pairs 25-74-1)
+gen   41 |   8.16M pos | 1058 games, 183 plies, p0 0.54, crash 33 | pol 0.629 (H 0.583) val 0.343 acc 0.884 | sp 31s dist 1s train 15s
+gen   42 |   8.36M pos | 1090 games, 184 plies, p0 0.51, crash 34 | pol 0.629 (H 0.583) val 0.351 acc 0.881 | sp 31s dist 1s train 15s
+STOP file found, exiting

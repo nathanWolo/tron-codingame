@@ -1,0 +1,17 @@
+[package]
+name = "tronzero"
+version = "0.1.0"
+edition = "2021"
+
+# No crates.io dependencies: the search and the network must end up in one
+# CodinGame file, so everything here is std only.
+
+[[bin]]
+name = "tronzero"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

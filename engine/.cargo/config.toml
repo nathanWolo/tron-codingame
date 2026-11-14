@@ -1,0 +1,4 @@
+# Local builds (self-play, matches) use this machine's AVX2/FMA. The CodinGame
+# paste cannot rely on this; it will need explicit target_feature kernels.
+[build]
+rustflags = ["-C", "target-cpu=native"]

@@ -1,0 +1,622 @@
+<title>Tronzero Design Notes</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap">
+<style>
+/* Layout: one reading column (about 68 characters) on a wider wrapper; figures and
+   tables use the full wrapper width. Two hues carry meaning everywhere: the mover
+   (and the AlphaZero agent) is teal, the opponent (and the alpha-beta engine) is orange.
+   Violet marks a third bike in the search diagram. */
+:root {
+  --bg: #f5f7f9;
+  --surface: #ffffff;
+  --fg: #161b22;
+  --muted: #5a6575;
+  --rule: #d6dce4;
+  --mover: #0b8497;
+  --opp: #c95f10;
+  --third: #7d5bd6;
+  --mover-tint: rgba(11, 132, 151, 0.14);
+  --opp-tint: rgba(201, 95, 16, 0.14);
+  --code-bg: #eaeef3;
+  --font-display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Inter", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1217; --surface: #151b22; --fg: #e4e9ef; --muted: #93a0b1; --rule: #2a323d;
+    --mover: #3cc3d8; --opp: #ff9648; --third: #b39cf5;
+    --mover-tint: rgba(60, 195, 216, 0.18); --opp-tint: rgba(255, 150, 72, 0.18);
+    --code-bg: #1d242d; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1217; --surface: #151b22; --fg: #e4e9ef; --muted: #93a0b1; --rule: #2a323d;
+  --mover: #3cc3d8; --opp: #ff9648; --third: #b39cf5;
+  --mover-tint: rgba(60, 195, 216, 0.18); --opp-tint: rgba(255, 150, 72, 0.18);
+  --code-bg: #1d242d; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg);
+  font-family: var(--font-body); font-size: 16px; line-height: 1.6;
+  padding-block: 40px 72px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 880px; margin: 0 auto; display: flex; flex-direction: column; gap: 48px; }
+section { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+p, ul, ol { margin: 0; max-width: 68ch; }
+ul, ol { padding-left: 1.2em; display: flex; flex-direction: column; gap: 6px; }
+h1, h2, h3 { font-family: var(--font-display); margin: 0; text-wrap: balance; line-height: 1.15; }
+h1 { font-size: clamp(1.9rem, 5vw, 2.7rem); font-weight: 700; letter-spacing: -0.02em; }
+h2 { font-size: 1.45rem; font-weight: 600; letter-spacing: -0.01em; }
+h3 { font-size: 1.02rem; font-weight: 600; }
+.eyebrow { font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 1.12rem; color: var(--fg); }
+.muted { color: var(--muted); }
+code { font-family: var(--font-mono); font-size: 0.88em; background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px; }
+.az { color: var(--mover); font-weight: 600; }
+.ab { color: var(--opp); font-weight: 600; }
+
+header { display: flex; flex-direction: column; gap: 14px; }
+.standing { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 0; border-top: 2px solid var(--fg); border-bottom: 1px solid var(--rule); }
+.standing div { padding: 14px 16px 14px 0; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.standing .num { font-family: var(--font-display); font-size: 1.9rem; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.standing .num small { font-size: 0.95rem; font-weight: 500; color: var(--muted); }
+.standing .what { font-size: 0.86rem; color: var(--muted); }
+
+figure { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.diagram { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 14px; overflow-x: auto; }
+.diagram svg { display: block; width: 100%; height: auto; min-width: 560px; }
+.diagram.narrow svg { min-width: 0; }
+figcaption { font-size: 0.88rem; color: var(--muted); max-width: 72ch; }
+svg text { fill: currentColor; font-family: var(--font-body); font-size: 12px; }
+svg .t-title { font-family: var(--font-display); font-weight: 600; font-size: 13.5px; }
+svg .t-mono { font-family: var(--font-mono); font-size: 11px; }
+svg .t-mute { fill: var(--muted); }
+svg .box { fill: var(--surface); stroke: currentColor; stroke-width: 1.3; }
+svg .line { stroke: currentColor; stroke-width: 1.3; fill: none; }
+svg .dash { stroke: var(--muted); stroke-width: 1.1; stroke-dasharray: 4 4; fill: none; }
+svg .m-fill { fill: var(--mover); } svg .o-fill { fill: var(--opp); }
+svg .m-tint { fill: var(--mover-tint); } svg .o-tint { fill: var(--opp-tint); }
+svg .m-line { stroke: var(--mover); stroke-width: 3; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+svg .o-line { stroke: var(--opp); stroke-width: 3; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+svg .m-text { fill: var(--mover); font-weight: 600; } svg .o-text { fill: var(--opp); font-weight: 600; }
+svg .p3-fill { fill: var(--third); } svg .p3-text { fill: var(--third); font-weight: 600; }
+svg .m-box { fill: var(--mover-tint); stroke: var(--mover); stroke-width: 1.3; }
+svg .o-box { fill: var(--opp-tint); stroke: var(--opp); stroke-width: 1.3; }
+svg .bg-box { fill: none; stroke: var(--muted); stroke-width: 1.1; }
+
+.split { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+@media (max-width: 720px) { .split { grid-template-columns: minmax(0, 1fr); } }
+.planes { list-style: none; padding: 0; gap: 0; border-top: 1px solid var(--rule); }
+.planes li { display: grid; grid-template-columns: 2.2em 1fr; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--rule); font-size: 0.93rem; }
+.planes .k { font-family: var(--font-mono); color: var(--muted); font-size: 0.82rem; padding-top: 2px; }
+
+.table-scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+th, td { text-align: left; padding: 9px 14px 9px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-family: var(--font-mono); font-weight: 500; font-size: 0.74rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--fg); white-space: nowrap; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.n { font-family: var(--font-mono); font-size: 0.86rem; }
+tbody tr:last-child td { border-bottom: 0; }
+
+.note { border-left: 3px solid var(--opp); padding: 2px 0 2px 14px; max-width: 68ch; }
+footer { font-size: 0.85rem; color: var(--muted); border-top: 1px solid var(--rule); padding-top: 16px; }
+</style>
+
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">tronzero · design notes · 14 Nov 2026 · two to four players</div>
+  <h1>An AlphaZero agent for CodinGame Tron, built on slinky's lessons</h1>
+  <p class="lede">One small network learns move priors and a value for every bike from its own games of two, three and four players. A PUCT search plays with them. The search and the network run in a dependency-free Rust engine, the same code for self-play and for play, and JAX on the GPU does only the training.</p>
+  <div class="standing">
+    <div><span class="num">0.64 <small>± 0.02</small></span><span class="what">placement score in four-player games against three alpha-beta engines at 20 ms per move (800 games): the share of opponents it finishes ahead of; 0.5 is parity</span></div>
+    <div><span class="num">29 <small>to</small> 34%</span><span class="what">of those four-player games won outright, where par is 25%: 29% in process (800 games), 34% through <code>sprt.py</code> (720 games)</span></div>
+    <div><span class="num">46%</span><span class="what">of three-player games won against two alpha-beta engines, where par is 33% (300 games); duels: 0.60 ± 0.03 (400 games)</span></div>
+  </div>
+  <p class="muted">After 40 generations: 8.0M self-play positions, about an hour of self-play and training on this machine. Intervals are 95%, from the spread between openings. This is one run with one seed, measured against one opponent. The single-file CodinGame paste is built and checked on this machine; nothing has played on CodinGame.</p>
+</header>
+
+<section>
+  <h2>The loop</h2>
+  <p>slinky runs self-play, search and learning as one JAX program. Here the game and the search are native code from the start, because the agent must end up as a single Rust file that searches on one CPU core in under 100 ms. Writing that engine first means the code that generates training games is the code that will play.</p>
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 880 310" role="img" aria-label="Self-play in the Rust engine writes positions to a replay ring; the JAX trainer samples batches from it and writes a new weights file, which the engine loads for the next generation. Every tenth generation the new network plays duels and four-player games against the alpha-beta engine.">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker>
+        </defs>
+        <rect class="m-box" x="20" y="50" width="210" height="96" rx="6"/>
+        <text class="t-title" x="36" y="76">Self-play</text>
+        <text x="36" y="98">Rust engine, 14 threads</text>
+        <text x="36" y="116">2, 3 and 4 bikes, mixed 1 : 1 : 3</text>
+        <text class="t-mute" x="36" y="134">64 simulations a move, later 128</text>
+
+        <rect class="box" x="345" y="50" width="190" height="96" rx="6"/>
+        <text class="t-title" x="361" y="76">Replay ring</text>
+        <text x="361" y="98">newest 1.0M positions</text>
+        <text x="361" y="116">352 bytes each</text>
+        <text class="t-mute" x="361" y="134">sampled from the newest 40%</text>
+
+        <rect class="box" x="650" y="50" width="210" height="96" rx="6"/>
+        <text class="t-title" x="666" y="76">Trainer</text>
+        <text x="666" y="98">JAX on the RX 9060 XT (ROCm)</text>
+        <text x="666" y="116">batches of 512, mirrored</text>
+        <text class="t-mute" x="666" y="134">about 4 uses of each position</text>
+
+        <line class="line" x1="230" y1="98" x2="343" y2="98" marker-end="url(#arr)"/>
+        <text x="287" y="90" text-anchor="middle">trails, visits,</text>
+        <text x="287" y="114" text-anchor="middle">placements</text>
+        <line class="line" x1="535" y1="98" x2="648" y2="98" marker-end="url(#arr)"/>
+        <text x="592" y="90" text-anchor="middle">random</text>
+        <text x="592" y="114" text-anchor="middle">batches</text>
+
+        <path class="line" d="M755 146 V196 H125 V149" marker-end="url(#arr)"/>
+        <text x="440" y="188" text-anchor="middle">new weights file each generation (85 s at 64 simulations)</text>
+
+        <line class="line" x1="440" y1="196" x2="440" y2="234" marker-end="url(#arr)"/>
+        <text class="t-mute" x="450" y="220">every 10th generation</text>
+        <rect class="o-box" x="270" y="236" width="340" height="60" rx="6"/>
+        <text class="t-title" x="286" y="261">Matches against the alpha-beta engine</text>
+        <text x="286" y="281">duels and four-player games, equal milliseconds per move</text>
+      </svg>
+    </div>
+    <figcaption>One generation: about 200,000 new positions from about 850 games, then about 1,600 gradient steps. The engine runs on Windows and the trainer in WSL; they share files. The benchmark compiles <code>tron-codingame/src/main.rs</code> into the match binary unchanged.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>Turns are sequential, so every node has one mover</h2>
+  <p>Battlesnake moves are simultaneous, which is why slinky's search is decoupled: each snake picks its move at a node without seeing the others'. CodinGame Tron is not like that. Bikes move one at a time in seat order, each having seen the moves before it. So every node of the tree belongs to one bike, and that bike picks the move that is best for itself.</p>
+  <p>With two bikes that is ordinary alternating PUCT. With three or four there is no single value to negate, so a node keeps one value per bike and the backup adds the leaf's values unchanged (the max<sup>n</sup> rule). A leaf is one of three things, and only one of them costs a network evaluation.</p>
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 800 340" role="img" aria-label="A search tree for three bikes. The root has bike A to move, its children bike B, their children bike C. Leaves are valued in three ways: an open position by the network, which returns a value for every bike; a position where the last two bikes are cut off by fill estimates without the network; and a finished game by its exact placements. The backup adds the same per-bike values to every node on the path.">
+        <defs>
+          <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker>
+        </defs>
+        <line class="line" x1="340" y1="48" x2="130" y2="104"/>
+        <line class="line" x1="340" y1="52" x2="340" y2="104"/>
+        <line class="line" x1="340" y1="48" x2="550" y2="104"/>
+        <line class="line" x1="130" y1="132" x2="130" y2="174"/>
+        <line class="line" x1="340" y1="132" x2="340" y2="174"/>
+        <line class="line" x1="550" y1="132" x2="550" y2="174"/>
+        <line class="line" x1="130" y1="202" x2="130" y2="236"/>
+        <line class="line" x1="340" y1="202" x2="340" y2="236"/>
+        <line class="line" x1="550" y1="202" x2="550" y2="236"/>
+
+        <circle class="m-fill" cx="340" cy="36" r="14"/>
+        <text x="362" y="40" class="m-text">root: A moves, picking what is best for A</text>
+        <circle class="o-fill" cx="130" cy="118" r="14"/>
+        <circle class="o-fill" cx="340" cy="118" r="14"/>
+        <circle class="o-fill" cx="550" cy="118" r="14"/>
+        <text x="572" y="122" class="o-text">B moves: best for B</text>
+        <circle class="p3-fill" cx="130" cy="188" r="14"/>
+        <circle class="p3-fill" cx="340" cy="188" r="14"/>
+        <circle class="p3-fill" cx="550" cy="188" r="14"/>
+        <text x="572" y="192" class="p3-text">C moves: best for C</text>
+        <text class="t-mute" x="222" y="72" text-anchor="end">UP</text>
+        <text class="t-mute" x="348" y="84">LEFT</text>
+        <text class="t-mute" x="458" y="72">RIGHT</text>
+
+        <rect class="box" x="30" y="238" width="200" height="62" rx="6"/>
+        <text class="t-title" x="44" y="262">Open position</text>
+        <text x="44" y="282">network: priors and values</text>
+        <rect class="box" x="240" y="238" width="200" height="62" rx="6"/>
+        <text class="t-title" x="254" y="262">Last two bikes cut off</text>
+        <text x="254" y="282">fill estimates, no network</text>
+        <rect class="box" x="450" y="238" width="200" height="62" rx="6"/>
+        <text class="t-title" x="464" y="262">One bike left</text>
+        <text x="464" y="282">exact placements</text>
+
+        <line class="line" x1="720" y1="296" x2="720" y2="30" marker-end="url(#arr2)"/>
+        <text x="732" y="150">backup:</text>
+        <text x="732" y="168">every bike's</text>
+        <text x="732" y="186">value,</text>
+        <text x="732" y="204">unchanged</text>
+      </svg>
+    </div>
+    <figcaption>At a node the mover picks the move with the highest <code>Q + c · P · √N / (1 + n)</code>, where <code>Q</code> is its own mean value below that move; an unvisited move counts as the node's mean minus 0.2, as in slinky.</figcaption>
+  </figure>
+
+  <h3>A value is a placement</h3>
+  <p>The network gives every bike still in the game a value in [−1, 1]: +1 for winning, −1 for being the next one out, evenly spaced between. In a duel that is the usual win or loss.</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Bikes still in</th><th class="n">Wins</th><th class="n">Second</th><th class="n">Third</th><th class="n">Fourth</th></tr></thead>
+      <tbody>
+        <tr><td>4</td><td class="n">+1</td><td class="n">+⅓</td><td class="n">−⅓</td><td class="n">−1</td></tr>
+        <tr><td>3</td><td class="n">+1</td><td class="n">0</td><td class="n">−1</td><td class="n"></td></tr>
+        <tr><td>2</td><td class="n">+1</td><td class="n">−1</td><td class="n"></td><td class="n"></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The network answers on the scale of the position it is shown. When bikes have died between the root and a leaf, the search maps the leaf's values onto the root's scale, so a bike that has outlasted one of four can no longer score below −⅓. slinky's <code>rescale_q</code> does the same job for its duel values. The target is placement, not only winning, because CodinGame ranks a multi-player game by finishing order.</p>
+
+  <h3>A dead bike's trail leaves the board</h3>
+  <p>A bike that cannot move when its turn comes is out and its trail disappears. That changes what a cut-off means. Between the last two bikes it is final: once no empty cell is reachable by both, the mover wins if it can make more moves than the other (it moves first, so a tie loses), and the search values that as <code>tanh((a − b − ½) / 3)</code> from the alpha-beta engine's fill estimator. Self-play adjudicates such games with the primed greedy fill and stops.</p>
+  <p>With three or more bikes a death can reopen the board, so the game goes on. A bike alone in its region while others still share space takes the greedy space-filling step from the existing engine, and a bike with one legal move takes it. The search passes through both kinds of position without a choice and without a network evaluation, up to six in a row, so a simulation ends at a position where someone has a decision. At play time an isolated agent uses the full primed fill.</p>
+</section>
+
+<section>
+  <h2>What the network sees</h2>
+  <div class="split">
+    <figure>
+      <div class="diagram narrow">
+        <svg viewBox="0 0 512 376" role="img" aria-label="The 30 by 20 board drawn on a 59 by 39 canvas so that the mover's head sits on the centre cell. The board is split into cells the mover reaches first and cells another bike reaches first.">
+          <rect class="dash" x="20" y="44" width="472" height="312"/>
+          <text class="t-mute" x="20" y="34">canvas 59 × 39, zero off the board</text>
+          <polygon class="o-tint" points="76,148 164,148 164,196 220,252 220,308 76,308"/>
+          <polygon class="m-tint" points="164,148 316,148 316,308 220,308 220,252 164,196"/>
+          <rect class="bg-box" x="76" y="148" width="240" height="160"/>
+          <text class="t-mute" x="76" y="140">board 30 × 20</text>
+          <polyline class="m-line" points="296,168 256,168 256,200"/>
+          <circle class="m-fill" cx="256" cy="200" r="6"/>
+          <polyline class="o-line" points="104,288 104,256 136,256"/>
+          <circle class="o-fill" cx="136" cy="256" r="6"/>
+          <line class="dash" x1="256" y1="44" x2="256" y2="186"/>
+          <line class="dash" x1="270" y1="200" x2="492" y2="200"/>
+          <text class="m-text" x="330" y="190">mover: centre cell</text>
+          <text class="o-text" x="118" y="244">next to move</text>
+          <text class="o-text" x="84" y="180">theirs first</text>
+          <text class="m-text" x="232" y="296">mine first</text>
+        </svg>
+      </div>
+      <figcaption>The view is egocentric, as in slinky: the board slides so the mover's head is always the centre cell. Drawn with one other bike; each further bike gets its own planes.</figcaption>
+    </figure>
+    <div>
+      <h3>Sixteen planes, all zero off the board</h3>
+      <ul class="planes">
+        <li><span class="k">0</span><span>Empty cell</span></li>
+        <li><span class="k">1–3</span><span>Head of each other bike, in turn order after the mover</span></li>
+        <li><span class="k">4–7</span><span>Cells each bike reaches first (a tie goes to the bike that moves sooner)</span></li>
+        <li><span class="k">8–11</span><span>How close each bike is: <code>(64 − distance) / 64</code></span></li>
+        <li><span class="k">12–15</span><span>Each bike's trail: the cells that come back if it dies</span></li>
+      </ul>
+      <p class="muted" style="margin-top:12px">Thirteen scalars go straight to the hidden layer: each bike's territory and reachable counts, the share of the board still empty, how many bikes are left, and the mover's territory lead over its best rival.</p>
+    </div>
+  </div>
+  <p>Bikes are always listed from the mover onwards in turn order, so the network never sees seat numbers, and a game that has come down to two bikes looks like a duel with the other planes empty. The policy head speaks for the mover; the value head has one output per listed bike.</p>
+  <p>The distance planes are the one place this departs from learning on raw boards. Who reaches a cell first needs a flood fill, which a few small convolutions cannot compute, and the engine gets all four distance maps from bitboard waves in under 4 µs. With them the network starts from what the Voronoi heuristic knows and learns the corrections.</p>
+</section>
+
+<section>
+  <h2>A network sized for a 100,000-character paste</h2>
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 860 250" role="img" aria-label="The canvas of 59 by 39 cells and 16 planes passes through three 3 by 3 stride-2 convolutions to 30 by 20 by 16, 15 by 10 by 24 and 8 by 5 by 24, is flattened with thirteen scalars into a hidden layer of 96 units, and ends in a 4-logit policy head and four tanh value outputs, one per bike. In each layer only the region the board can influence is computed per position.">
+        <defs>
+          <marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker>
+        </defs>
+        <rect class="bg-box" x="20" y="73" width="142" height="94"/>
+        <rect class="m-box" x="37" y="104" width="72" height="48"/>
+        <rect class="bg-box" x="230" y="96" width="72" height="48"/>
+        <rect class="m-box" x="238" y="112" width="38" height="26"/>
+        <rect class="bg-box" x="370" y="108" width="36" height="24"/>
+        <rect class="m-box" x="374" y="115" width="20" height="14"/>
+        <rect class="bg-box" x="474" y="112" width="24" height="16"/>
+        <rect class="m-box" x="477" y="116" width="13" height="9"/>
+        <rect class="box" x="590" y="72" width="14" height="96"/>
+        <rect class="box" x="690" y="66" width="150" height="42" rx="6"/>
+        <rect class="box" x="690" y="132" width="150" height="42" rx="6"/>
+        <text class="t-title" x="704" y="92">policy: 4 logits</text>
+        <text class="t-title" x="704" y="158">values: 4 × tanh</text>
+
+        <line class="line" x1="164" y1="120" x2="228" y2="120" marker-end="url(#arr3)"/>
+        <line class="line" x1="304" y1="120" x2="368" y2="120" marker-end="url(#arr3)"/>
+        <line class="line" x1="408" y1="120" x2="472" y2="120" marker-end="url(#arr3)"/>
+        <line class="line" x1="500" y1="120" x2="588" y2="120" marker-end="url(#arr3)"/>
+        <line class="line" x1="606" y1="104" x2="688" y2="88" marker-end="url(#arr3)"/>
+        <line class="line" x1="606" y1="136" x2="688" y2="152" marker-end="url(#arr3)"/>
+        <text class="t-mute" x="196" y="110" text-anchor="middle">3×3, /2</text>
+        <text class="t-mute" x="336" y="110" text-anchor="middle">3×3, /2</text>
+        <text class="t-mute" x="440" y="110" text-anchor="middle">3×3, /2</text>
+        <text class="t-mute" x="544" y="110" text-anchor="middle">flatten</text>
+        <text class="t-mute" x="544" y="138" text-anchor="middle">+ 13 scalars</text>
+
+        <text class="t-mono" x="91" y="190" text-anchor="middle">59×39×16</text>
+        <text class="t-mono" x="266" y="190" text-anchor="middle">30×20×16</text>
+        <text class="t-mono" x="388" y="190" text-anchor="middle">15×10×24</text>
+        <text class="t-mono" x="486" y="190" text-anchor="middle">8×5×24</text>
+        <text class="t-mono" x="597" y="190" text-anchor="middle">96</text>
+
+        <rect class="m-box" x="20" y="218" width="14" height="14"/>
+        <text x="42" y="230">computed for each position (where the board is)</text>
+        <rect class="bg-box" x="380" y="218" width="14" height="14"/>
+        <text x="402" y="230">background: the response to an empty canvas, computed once at load</text>
+      </svg>
+    </div>
+    <figcaption>105,288 parameters, a third of slinky's duel network. Nine tenths of them are the hidden layer. The board covers about a quarter of the canvas, so each layer is computed only where it can differ from the background.</figcaption>
+  </figure>
+  <p>CodinGame takes one source file of at most 100,000 characters, weights included, and gives one core 100 ms. Both limits point the same way: a network small enough to pack into the paste is also fast enough to search with. Going from two players to four changed only the input planes and the value head, about 2,400 parameters.</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Evaluation kernel</th><th class="n">µs per position</th><th>Change</th></tr></thead>
+      <tbody>
+        <tr><td>Auto-vectorised loops, skipping zero inputs</td><td class="n">59.9</td><td>First version (two players, six planes)</td></tr>
+        <tr><td>Explicit AVX2 and FMA, accumulators in registers</td><td class="n">23.0</td><td>No zero test: a mispredicted branch costs more than the multiply</td></tr>
+        <tr><td>Several accumulator sets per output</td><td class="n">18.0</td><td>Breaks the FMA latency chain in the first layer</td></tr>
+        <tr><td>Two to four players: sixteen planes, four distance maps</td><td class="n">32.2</td><td>The first layer has 2.7 times the inputs</td></tr>
+        <tr><td>First layer reads only the planes of bikes still in</td><td class="n">28.0</td><td>Half the planes are empty once two bikes are left</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="muted">At 28 µs: distances 3.9, canvas 2.6, the three convolutions 9.4, 7.0 and 3.3, hidden layer and heads 1.7. One core of a Ryzen 7 5800XT; CodinGame's servers are slower.</p>
+</section>
+
+<section>
+  <h2>What carried over from slinky</h2>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>slinky's AlphaZero</th><th>Here</th></tr></thead>
+      <tbody>
+        <tr><td>Learning from scratch beat starting from a heuristic teacher</td><td>Random initial network, no teacher</td></tr>
+        <tr><td>Egocentric observation, small conv torso, one dense layer</td><td>Same shape, smaller: 16, 24, 24 channels and 96 hidden units</td></tr>
+        <tr><td>PUCT with <code>c</code> 0.5 on values in [0, 1]; first-play urgency 0.2</td><td>Same constants (<code>c</code> 1.0 on [−1, 1])</td></tr>
+        <tr><td>64 simulations per move; 25% Dirichlet noise, α 0.5</td><td>Same; 128 simulations after the plateau</td></tr>
+        <tr><td>Sample moves from visit counts for the first 16 turns</td><td>First 10 rounds</td></tr>
+        <tr><td>Targets: root visit shares and the game outcome; about 4 uses per position</td><td>Same, with every bike's placement as the outcome</td></tr>
+        <tr><td>Values rescaled to the root when the number of snakes changes (<code>rescale_q</code>)</td><td>Leaf placements mapped onto the root's scale</td></tr>
+        <tr><td>Random board symmetry per sample (8 on a square board)</td><td>4 mirrors: the board is 30 × 20</td></tr>
+        <tr><td>Exact values at finished positions</td><td>Also when the last two bikes are cut off, from fill estimates</td></tr>
+        <tr><td>Native Rust port for deployment: no dependencies, padding-aware layers, SIMD, tree reuse</td><td>Built first and used for self-play too. Tree reuse measured neutral in duels and was dropped</td></tr>
+        <tr><td>On ROCm 7.2, matrix products with 2<sup>19</sup> or more rows can be wrong</td><td>Batch 512 keeps the largest product at 307,200 rows; GPU gradients checked against the CPU</td></tr>
+        <tr><td>A smaller <code>c</code> at play time was stronger than the training value</td><td>No difference here: 0.6 and 1.6 against 1.0 scored 0.51 and 0.50, each ± 0.02, in four-player games</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Three things are checked outside training. The Rust forward pass and the JAX one agree on 512 random positions with two, three and four bikes alive (identical distance maps, outputs within 4 × 10<sup>−7</sup>). The rules hold their invariants over 30,000 random games. And through the existing referee, <code>sprt.py</code>, the agent's every death in 144 games at two, three and four players was a real trap: no illegal move, no timeout, so its picture of the board matches the referee's, vanishing trails included.</p>
+</section>
+
+<section>
+  <h2>Results: two to four players</h2>
+  <p>Generation 40 of the two-to-four-player run against the <span class="ab">alpha-beta engine</span>, at equal time per move. In a multi-player game one <span class="az">agent</span> sits among copies of the alpha-beta engine, and every opening (a random spawn and four random moves per bike) is replayed with the agent starting from each seat. The placement score is the share of its opponents the agent finishes ahead of, so 0.5 is parity; in a duel it is the win rate.</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Game</th><th class="n">Budget</th><th class="n">Games</th><th class="n">Placement score</th><th class="n">Games won (at par)</th><th class="n">Placed 1st / 2nd / 3rd / 4th</th></tr></thead>
+      <tbody>
+        <tr><td>Duel</td><td class="n">20 ms</td><td class="n">400</td><td class="n">0.595 ± 0.033</td><td class="n">59.5% (50%)</td><td class="n">238 / 162</td></tr>
+        <tr><td>Three players: agent and two alpha-beta</td><td class="n">20 ms</td><td class="n">300</td><td class="n">0.673 ± 0.034</td><td class="n">45.7% (33.3%)</td><td class="n">137 / 130 / 33</td></tr>
+        <tr><td>Four players: agent and three alpha-beta</td><td class="n">20 ms</td><td class="n">800</td><td class="n">0.638 ± 0.021</td><td class="n">29.4% (25%)</td><td class="n">235 / 321 / 184 / 60</td></tr>
+        <tr><td>Four players: agent and three alpha-beta</td><td class="n">100 ms</td><td class="n">120</td><td class="n">0.650 ± 0.055</td><td class="n">30.8% (25%)</td><td class="n">37 / 52 / 19 / 12</td></tr>
+        <tr><td>Four players, through <code>sprt.py</code></td><td class="n">20 ms</td><td class="n">720</td><td class="n">not reported</td><td class="n">33.8% (25%)</td><td class="n"></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The agent is ahead in every format. In four-player games it finishes ahead of a given alpha-beta engine 64% of the time and is the first bike out in 60 games of 800, against 200 at par. The roles reversed tell the same story: one alpha-beta engine among three agents (200 games at 20 ms) scored 0.295 ± 0.045 on placement, won 15.5% and was first out in 109 games.</p>
+  <p>Its share of outright wins is above par by less. In process, on 200 random openings, it won 29.4%. Through the existing referee, with the engines as separate processes, it won 243 of 720 (33.8%) over three seeds of the referee's 60 book openings: 87, 74 and 82 of 240. The two harnesses agree within their noise. The first of those seeds alone gave 88 to 92 of 240 in four earlier runs, which is where an earlier version of these notes got 37.5%: which openings are played matters more than which harness plays them. Those earlier runs also had the frame-reader bug described under the paste; the in-process matches never did.</p>
+
+  <h3>A four-player game is decided before the last duel starts</h3>
+  <p>In 400 four-player games at 20 ms, split by the moment the game came down to the agent and one alpha-beta engine:</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>When two bikes were left</th><th class="n">Games</th><th class="n">Agent won</th></tr></thead>
+      <tbody>
+        <tr><td>Agent in the last two, with the larger territory</td><td class="n">120</td><td class="n">116</td></tr>
+        <tr><td>Agent in the last two, with the smaller territory</td><td class="n">157</td><td class="n">7</td></tr>
+        <tr><td>Agent already out</td><td class="n">121</td><td class="n">0</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The agent reaches the last two in about 70% of games, where par is 50%, but arrives with less territory more often than not, and whoever is ahead at that moment wins 96% of the time. A likely reading, not yet tested: it survives positions a weaker bike would have died in, and the alpha-beta engine it then meets is the best placed of three. The training target makes this a fair trade, since second of four is worth +⅓. A target that pays more for first place would trade placements for wins.</p>
+  <p class="muted">In the two remaining games two bikes were trapped in immediate succession, so no last-two position occurred; the agent won one.</p>
+
+  <h3>How it got there</h3>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Generation</th><th class="n">Positions</th><th class="n">Duels vs alpha-beta</th><th class="n">4-player placement</th><th class="n">4-player wins</th><th class="n">4-player vs 10 generations earlier</th></tr></thead>
+      <tbody>
+        <tr><td>10</td><td class="n">2.0M</td><td class="n">0.533</td><td class="n">0.592 ± 0.038</td><td class="n">25.4%</td><td class="n"></td></tr>
+        <tr><td>20</td><td class="n">4.0M</td><td class="n">0.575</td><td class="n">0.613 ± 0.037</td><td class="n">27.1%</td><td class="n">0.543 ± 0.016</td></tr>
+        <tr><td>30</td><td class="n">6.0M</td><td class="n">0.558</td><td class="n">0.633 ± 0.040</td><td class="n">33.3%</td><td class="n">0.496 ± 0.016</td></tr>
+        <tr><td>40</td><td class="n">8.0M</td><td class="n">0.575</td><td class="n">0.636 ± 0.042</td><td class="n">33.3%</td><td class="n">0.517 ± 0.015</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>These are the matches the loop plays by itself every tenth generation: 120 duels and 240 four-player games against the alpha-beta engine at 20 ms, and 600 four-player games between networks at the training search's simulations. Most of the strength arrives in the first 20 generations, half an hour. Generation 30 against generation 20 was level, so generations 31 to 40 ran with the learning rate lowered from 1e-3 to 3e-4 and 128 simulations per move instead of 64; that bought 0.517 over ten generations. The network size has not been varied.</p>
+  <p>One network for every player count costs something in duels: this one scores 0.595 ± 0.033 against the alpha-beta engine (45 openings won from both seats, 7 lost from both, 148 split), where the two-player-only network below scored 0.648 ± 0.047 (60, 1 and 139).</p>
+</section>
+
+<section>
+  <h2>The earlier two-player run</h2>
+  <p>The first version of the agent played duels only: six input planes, one value, 102,885 parameters, and a search that negates the value on every ply. Its results are kept here because they show where a duel is decided.</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Network</th><th class="n">Positions</th><th class="n">Budget</th><th class="n">Games</th><th class="n">Score vs alpha-beta</th></tr></thead>
+      <tbody>
+        <tr><td>Generation 5</td><td class="n">0.93M</td><td class="n">20 ms</td><td class="n">300</td><td class="n">0.607 ± 0.055</td></tr>
+        <tr><td>Generation 13</td><td class="n">2.54M</td><td class="n">100 ms</td><td class="n">200</td><td class="n">0.640 ± 0.067</td></tr>
+        <tr><td>Generation 21</td><td class="n">4.15M</td><td class="n">20 ms</td><td class="n">400</td><td class="n">0.648 ± 0.047</td></tr>
+        <tr><td>Generation 23, through <code>sprt.py</code></td><td class="n">4.55M</td><td class="n">20 ms</td><td class="n">240</td><td class="n">0.625 (150–90)</td></tr>
+        <tr><td>Generation 23</td><td class="n">4.55M</td><td class="n">100 ms</td><td class="n">200</td><td class="n">0.575 ± 0.069</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <h3>Most openings are won by the seat, not the engine</h3>
+  <p>Each opening is played twice, once with each engine in each seat:</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Opening pairs</th><th class="n">Agent won both</th><th class="n">Same seat won both</th><th class="n">Alpha-beta won both</th></tr></thead>
+      <tbody>
+        <tr><td>20 ms per move, generation 21</td><td class="n">60</td><td class="n">139</td><td class="n">1</td></tr>
+        <tr><td>100 ms per move, generation 23</td><td class="n">16</td><td class="n">83</td><td class="n">1</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>In 70% of openings at 20 ms, and 83% at 100 ms, the same seat wins whichever engine sits in it. Where the engine matters, the agent wins nearly every time. A score of 0.65 is therefore close to the most a duel benchmark can show.</p>
+  <h3>Where duels are decided</h3>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>At the first cut-off (generation 13, 20 ms)</th><th class="n">Games</th><th class="n">Agent won</th></tr></thead>
+      <tbody>
+        <tr><td>Agent ahead in the fill race</td><td class="n">183</td><td class="n">181</td></tr>
+        <tr><td>Agent behind</td><td class="n">101</td><td class="n">2</td></tr>
+        <tr><td>No cut-off: a bike crashed while they still shared space</td><td class="n">16</td><td class="n">1</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Whoever is ahead when the bikes separate wins 99% of the time, so the open game is where the result is made. The two-player run also plateaued, after about 15 generations; with the same network, 256 simulations against 64 scored 0.545 and 1,024 against 256 scored 0.565, so deeper search helps a little and steadily.</p>
+</section>
+
+<section>
+  <h2>The paste: one Rust file of 95,566 characters</h2>
+  <p>CodinGame takes a single source file. <code>tools/make_paste.py</code> builds it from the engine's own sources, so the file that plays on CodinGame is the code measured above: the board, the forward pass, the search and the play loop, each wrapped in a module, with comments, indentation and the training-only code removed, and the weights appended as one string. The result is <code>paste/tronzero_paste.rs</code>.</p>
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 880 226" role="img" aria-label="Two weights are each rounded to a 7-bit integer, the two integers are joined into 14 bits, and the 14 bits become one character. 58,183 such characters hold the network. The paste is 36,895 characters of engine code and 58,671 of weights, leaving 4,434 of CodinGame's 100,000 spare.">
+        <defs>
+          <marker id="arr4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker>
+        </defs>
+        <rect class="box" x="20" y="20" width="150" height="56" rx="6"/>
+        <text class="t-title" x="34" y="43">two weights</text>
+        <text class="t-mono" x="34" y="63">0.031  −0.037</text>
+        <rect class="box" x="260" y="20" width="160" height="56" rx="6"/>
+        <text class="t-title" x="274" y="43">two 7-bit integers</text>
+        <text class="t-mono" x="274" y="63">12  −14</text>
+        <rect class="box" x="510" y="20" width="150" height="56" rx="6"/>
+        <text class="t-title" x="524" y="43">14 bits</text>
+        <text class="t-mono" x="524" y="63">10011000110010</text>
+        <rect class="m-box" x="750" y="20" width="110" height="56" rx="6"/>
+        <text class="t-title" x="764" y="43">one character</text>
+        <text x="764" y="67" style="font-size:19px">琲</text>
+
+        <line class="line" x1="172" y1="48" x2="258" y2="48" marker-end="url(#arr4)"/>
+        <line class="line" x1="422" y1="48" x2="508" y2="48" marker-end="url(#arr4)"/>
+        <line class="line" x1="662" y1="48" x2="748" y2="48" marker-end="url(#arr4)"/>
+        <text class="t-mute" x="215" y="38" text-anchor="middle">÷ scale</text>
+        <text class="t-mute" x="215" y="66" text-anchor="middle">round</text>
+        <text class="t-mute" x="465" y="38" text-anchor="middle">+ 64 each</text>
+        <text class="t-mute" x="465" y="66" text-anchor="middle">join</text>
+        <text class="t-mute" x="705" y="38" text-anchor="middle">+ U+4E00</text>
+
+        <path class="dash" d="M805 78 V112 H576 V146" marker-end="url(#arr4)"/>
+        <text class="t-mute" x="588" y="106">58,183 characters hold the network</text>
+
+        <text class="t-mute" x="20" y="142">0</text>
+        <text class="t-mute" x="860" y="142" text-anchor="end">100,000 characters</text>
+        <rect class="box" x="20" y="150" width="309.9" height="34"/>
+        <rect class="m-box" x="329.9" y="150" width="492.8" height="34"/>
+        <rect class="bg-box" x="822.7" y="150" width="37.3" height="34" stroke-dasharray="4 4"/>
+        <text x="34" y="171"><tspan class="t-title">engine code</tspan><tspan class="t-mono" dx="10">36,895</tspan></text>
+        <text x="344" y="171"><tspan class="t-title">weights</tspan><tspan class="t-mono" dx="10">58,671</tspan></text>
+        <text class="t-mute" x="860" y="204" text-anchor="end">4,434 spare</text>
+        <text class="t-mute" x="344" y="204">105,288 parameters: 7 bits each in the hidden layer, 12 elsewhere</text>
+      </svg>
+    </div>
+    <figcaption>Each weight is divided by a scale kept for its output unit (here 0.0026) and rounded to an integer. The integers go into one bit stream, cut into 14-bit pieces, and each piece is written as one of 16,384 CJK ideographs. CodinGame's limit counts characters, not bytes, so a 7-bit weight costs half a character.</figcaption>
+  </figure>
+  <p>The two kinds of layer tolerate rounding very differently. The hidden layer holds nine tenths of the weights and is fine at 7 bits. The small layers are not fine at 8: the first convolution, the scalar inputs and the two heads each move the outputs when rounded that coarsely, and together they shift some value outputs by half the value range. They are a tenth of the weights, so 12 bits for them costs 3,700 characters and brings the error down to what the hidden layer alone causes.</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Bits: hidden / rest</th><th class="n">Characters</th><th class="n">Mean value change</th><th class="n">Largest</th><th class="n">Top move changes</th></tr></thead>
+      <tbody>
+        <tr><td>8 / 8</td><td class="n">98,469</td><td class="n">0.019</td><td class="n">0.47</td><td class="n">3.5%</td></tr>
+        <tr><td>7 / 8</td><td class="n">91,832</td><td class="n">0.020</td><td class="n">0.57</td><td class="n">3.5%</td></tr>
+        <tr><td>7 / 7</td><td class="n">90,900</td><td class="n">0.041</td><td class="n">0.83</td><td class="n">5.3%</td></tr>
+        <tr><td><strong>7 / 12, the paste</strong></td><td class="n">95,566</td><td class="n">0.005</td><td class="n">0.10</td><td class="n">1.0%</td></tr>
+        <tr><td>7 / 16</td><td class="n">99,299</td><td class="n">0.005</td><td class="n">0.09</td><td class="n">0.8%</td></tr>
+        <tr><td>6 / 12</td><td class="n">88,931</td><td class="n">0.011</td><td class="n">0.17</td><td class="n">2.3%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="muted">Bits per weight in the hidden layer and in the other layers; the size of the whole paste; and how far the rounded network's outputs are from the float one's on 4,000 random positions. Values run from −1 to 1; the top move is the one with the highest prior. Played against the float network at 64 simulations per move, the paste's weights score 0.4975 ± 0.007 with four players (1,800 games) and 0.515 ± 0.012 in duels (1,200 games), where 0.5 is level.</p>
+
+  <h3>What the engine needed before it could be pasted</h3>
+  <ul>
+    <li><strong>Kernels chosen when the program starts.</strong> The AVX2 and FMA kernels run only if the processor reports both; otherwise plain loops compute the same network at about half the speed.</li>
+    <li><strong>A deadline that adapts.</strong> The search stops when two more steps as long as its slowest so far would not fit. CodinGame's arena compiles Rust with optimisation, but its IDE does not, and there one simulation takes about 3 ms instead of 30 µs. A check every so many simulations would have timed out; this one stays inside 100 ms with a couple of dozen simulations.</li>
+    <li><strong>A move without search.</strong> If not one simulation fits, the legal move with the highest prior is played.</li>
+    <li><strong>Buffers on cache lines.</strong> The kernels read 32 bytes at a time, and the allocator only promises 16-byte alignment. Whether the weights landed aligned changed from one build to the next: the paste ran 12% slower per simulation than the engine with identical code. Weights and activations now start on 64-byte boundaries, and the two builds are within 2% of each other.</li>
+  </ul>
+
+  <h3>A bug the referee found: a head erased with a dead bike's trail</h3>
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 880 196" role="img" aria-label="Three panels. First: an orange bike's trail runs through a marked cell next to the agent and below a violet bike's head. Second: the orange bike has crashed and its trail is gone, and the violet bike has stepped onto the marked cell. Third: the board the old frame reader kept, in which the marked cell is empty because the orange trail was cleared after the violet head had been placed on it.">
+        <text class="t-title" x="20" y="22">1. Before</text>
+        <text class="t-title" x="310" y="22">2. On the board one round later</text>
+        <text class="t-title" x="600" y="22">3. What the old reader kept</text>
+
+        <g transform="translate(20 34)">
+          <rect class="bg-box" x="0" y="0" width="150" height="90"/>
+          <path class="dash" d="M30 0V90M60 0V90M90 0V90M120 0V90M0 30H150M0 60H150" style="stroke-dasharray:none;opacity:.35"/>
+          <rect x="30" y="60" width="30" height="30" class="m-tint"/><rect x="30" y="30" width="30" height="30" class="m-fill"/>
+          <rect x="90" y="0" width="60" height="30" fill="var(--third)" opacity=".28"/><rect x="60" y="0" width="30" height="30" class="p3-fill"/>
+          <rect x="60" y="30" width="60" height="30" class="o-tint"/><rect x="120" y="30" width="30" height="30" class="o-fill"/>
+          <rect x="62" y="32" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6"/>
+        </g>
+        <g transform="translate(310 34)">
+          <rect class="bg-box" x="0" y="0" width="150" height="90"/>
+          <path class="dash" d="M30 0V90M60 0V90M90 0V90M120 0V90M0 30H150M0 60H150" style="stroke-dasharray:none;opacity:.35"/>
+          <rect x="30" y="60" width="30" height="30" class="m-tint"/><rect x="30" y="30" width="30" height="30" class="m-fill"/>
+          <rect x="60" y="0" width="90" height="30" fill="var(--third)" opacity=".28"/><rect x="60" y="30" width="30" height="30" class="p3-fill"/>
+          <rect x="62" y="32" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6"/>
+        </g>
+        <g transform="translate(600 34)">
+          <rect class="bg-box" x="0" y="0" width="150" height="90"/>
+          <path class="dash" d="M30 0V90M60 0V90M90 0V90M120 0V90M0 30H150M0 60H150" style="stroke-dasharray:none;opacity:.35"/>
+          <rect x="30" y="60" width="30" height="30" class="m-tint"/><rect x="30" y="30" width="30" height="30" class="m-fill"/>
+          <rect x="60" y="0" width="90" height="30" fill="var(--third)" opacity=".28"/>
+          <rect x="62" y="32" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="4 3"/>
+        </g>
+
+        <text x="180" y="52"><tspan class="m-text">agent</tspan>, <tspan class="p3-text">violet</tspan> and</text>
+        <text x="180" y="68"><tspan class="o-text">orange</tspan> bikes; the</text>
+        <text x="180" y="84">marked cell is part</text>
+        <text x="180" y="100">of the orange trail</text>
+        <text x="470" y="52">orange crashed and</text>
+        <text x="470" y="68">its trail left; then</text>
+        <text x="470" y="84">violet stepped onto</text>
+        <text x="470" y="100">the marked cell</text>
+        <text x="760" y="52">violet head placed,</text>
+        <text x="760" y="68">then the orange</text>
+        <text x="760" y="84">trail cleared: the</text>
+        <text x="760" y="100">cell reads as free</text>
+
+        <text class="t-mute" x="20" y="150">The frame the agent gets shows the orange bike as out and the violet head on the marked cell, both for the first time.</text>
+        <text class="t-mute" x="20" y="168">The reader went through the bikes in order: violet (placed on a cell it still held as orange trail), then orange (trail cleared).</text>
+        <text class="t-mute" x="20" y="186">It now removes every bike that is out before it places any head.</text>
+      </svg>
+    </div>
+    <figcaption>The agent's board lost a cell another bike had just taken, and it could later steer into that cell with other moves available. The bug was in the engine's CodinGame loop since the move to four players, so every earlier match through the referee had it; the in-process matches do not use the frame reader.</figcaption>
+  </figure>
+  <p>The referee's log showed three such crashes in 1,200 games of the paste, and a saved game reproduced one move for move. <code>tools/paste_check.py</code> now starts with a scripted position that fails on the old reader and passes on the new one.</p>
+
+  <h3>What was checked here</h3>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Check</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>Same moves as the engine, given the same weights and a fixed number of simulations</td><td>0 of 2,740 moves differ: 1,229 with the optimised build, 799 with the plain-loop kernels, 309 with the unoptimised build, 403 compiled as edition 2018</td></tr>
+        <tr><td>Time per turn at the built-in budget (95 ms, 80 ms on the first turn), measured from outside the process</td><td>Longest turn 95.3 ms optimised, 95.3 ms with plain loops, 94.7 ms unoptimised; longest first turn 86.1 ms; 1,363 turns, none over 100 ms</td></tr>
+        <tr><td>Compiles without warnings</td><td>Rust 1.59 (December 2021) and 1.97, editions 2018 and 2021, with and without optimisation</td></tr>
+        <tr><td>Simulations per second</td><td>27.8 µs per simulation in mid-game four-player positions, against 27.3 for the engine built with this machine's instruction set</td></tr>
+        <tr><td>The frame reader's scripted position</td><td>Passes on every build of the paste and on the engine; fails on the builds from before the fix</td></tr>
+        <tr><td>Referee: four players at 20 ms against three <span class="ab">alpha-beta engines</span>, 240 games on each of three opening seeds</td><td><span class="az">Paste</span>: 219 of 720 won (30.4%: 69, 73 and 77). <span class="az">Engine</span> with the float weights: 243 of 720 (33.8%: 87, 74 and 82). Par is 25%. In those 1,440 games the agent never timed out, never answered an illegal move and never crashed with a move available</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The paste won 30.4% of its referee games and the engine 33.8%. A difference of 3.3 points is inside the noise of 720 games each (about ±4.7 at 95%), but the paste also trailed in the matches played before the two fixes, so a real gap of a few points cannot be excluded. Nothing measured explains one: with equal simulations the two play the same moves, the paste gets 3% fewer simulations in a 20 ms turn, and its rounded weights are level with the float ones.</p>
+  <p class="note">Nothing here has run on CodinGame. Three things only a submission can show: that its editor counts the file as 95,566 characters (it is 211,932 bytes as UTF-8), which Rust version compiles it, and how many simulations its machines manage in 95 ms. The paste prints that count to stderr every turn, and its two time budgets are constants at the top of the file.</p>
+</section>
+
+<section>
+  <h2>Not done</h2>
+  <ul>
+    <li><strong>Not submitted.</strong> The paste is checked only on this machine. What a submission would show is listed under the paste.</li>
+    <li><strong>The paste may be a few points weaker than the engine</strong> through the referee: 30.4% of four-player games won against 33.8%, over 720 games each. The difference is within noise and unexplained.</li>
+    <li><strong>Placement or wins.</strong> The target pays +⅓ for second of four. That matches a ranking by finishing order but leaves the outright win rate close to par in process. A target weighted towards first place has not been tried.</li>
+    <li><strong>One run, one seed,</strong> about an hour of training, which plateaued after 30 generations. The network size, the simulation count and the search constants are slinky's or first guesses. Three-player games were measured only at 20 ms.</li>
+    <li><strong>One network for all player counts</strong> is weaker in duels than the two-player-only one (0.595 against 0.648).</li>
+    <li><strong>Only one opponent.</strong> Every strength number is against the existing alpha-beta engine on this machine.</li>
+  </ul>
+</section>
+
+<footer>
+  Engine: <code>engine/src</code> (board, net, mcts, play, main). Paste: <code>tools/make_paste.py</code>, <code>tools/paste_check.py</code>, <code>paste/tronzero_paste.rs</code>. Trainer: <code>train/tz.py</code>, <code>train/loop.py</code>. Runs: <code>runs/n1</code> (two to four players), <code>runs/r1</code> (the earlier two-player run). Hardware: Ryzen 7 5800XT, Radeon RX 9060 XT through ROCm 7.2.4 in WSL.
+</footer>
+
+</div>

@@ -1,0 +1,4 @@
+Frozen 2026-11-14 10:02
+engine  bin/tronzero.exe  sha256 854aebaef45e9df53a3ea76e6edd920ec0cad3072829bcf7833db74de58bf503
+network runs/n1/nets/0040.bin  sha256 c7e7e3df719a05e73cdfdd04933f617b899d0a5d6b62dd27ef71b2b01fcde699
+The engine the CodinGame paste of 14 Nov 2026 was checked against: generation 40, c_puct 1.0, fpu 0.2, no tree reuse.

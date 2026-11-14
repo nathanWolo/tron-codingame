@@ -1,0 +1,46 @@
+Probes of 14 Nov 2026, made while comparing the engine with crossfish.
+Network: runs/n1/nets/0040.bin against itself, fixed simulations, in process.
+Side a is the measured side; score 0.5 is level; ci95 comes from the spread between openings.
+Every opening is played with all seatings (2 with two players, 6 with four).
+
+Command: bin/tronzero-dev.exe match --a NET --b NET --players P --pairs N --seed S plus the settings shown.
+
+== Simulations ==
+4p, --sims-a 2000 --sims-b 1000, 100 openings, seed 101
+{"players": 4, "openings": 100, "games": 600, "score": 0.5183, "ci95": 0.0120, "win_rate": 0.5383, "mean_rank": 2.445, "placed": [323, 299, 299, 279], "pairs_lost": 29, "pairs_split": 19, "pairs_won": 52}
+2p, --sims-a 2000 --sims-b 1000, 200 openings, seed 102
+{"players": 2, "openings": 200, "games": 400, "score": 0.5175, "ci95": 0.0224, "win_rate": 0.5175, "mean_rank": 1.482, "placed": [207, 193, 0, 0], "pairs_lost": 7, "pairs_split": 179, "pairs_won": 14}
+
+== Exploration constant (--sims 1000; the engine plays with c_puct 1.0) ==
+4p, --c-puct-a 1.6 --c-puct-b 1.0, 60 openings, seed 107
+{"players": 4, "openings": 60, "games": 360, "score": 0.4926, "ci95": 0.0203, "win_rate": 0.4944, "mean_rank": 2.522, "placed": [178, 172, 186, 184], "pairs_lost": 29, "pairs_split": 8, "pairs_won": 23}
+4p, --c-puct-a 0.6 --c-puct-b 1.0, 60 openings, seed 108
+{"players": 4, "openings": 60, "games": 360, "score": 0.5292, "ci95": 0.0196, "win_rate": 0.5694, "mean_rank": 2.413, "placed": [205, 178, 172, 165], "pairs_lost": 16, "pairs_split": 14, "pairs_won": 30}
+4p, --c-puct-a 0.6 --c-puct-b 1.0, 60 fresh openings, seed 208
+{"players": 4, "openings": 60, "games": 360, "score": 0.5102, "ci95": 0.0208, "win_rate": 0.5139, "mean_rank": 2.469, "placed": [185, 183, 181, 171], "pairs_lost": 22, "pairs_split": 8, "pairs_won": 30}
+  (the two 0.6 runs pooled: 0.520 +/- 0.014)
+4p, --c-puct-a 0.4 --c-puct-b 0.6, 60 openings, seed 209
+{"players": 4, "openings": 60, "games": 360, "score": 0.5106, "ci95": 0.0169, "win_rate": 0.5167, "mean_rank": 2.468, "placed": [186, 183, 179, 172], "pairs_lost": 22, "pairs_split": 9, "pairs_won": 29}
+2p, --c-puct-a 1.6 --c-puct-b 1.0, 150 openings, seed 109
+{"players": 2, "openings": 150, "games": 300, "score": 0.4900, "ci95": 0.0217, "win_rate": 0.4900, "mean_rank": 1.510, "placed": [147, 153, 0, 0], "pairs_lost": 7, "pairs_split": 139, "pairs_won": 4}
+2p, --c-puct-a 0.6 --c-puct-b 1.0, 150 openings, seed 110
+{"players": 2, "openings": 150, "games": 300, "score": 0.5000, "ci95": 0.0293, "win_rate": 0.5000, "mean_rank": 1.500, "placed": [150, 150, 0, 0], "pairs_lost": 10, "pairs_split": 130, "pairs_won": 10}
+
+== Tree reuse (what the tree of a player's previous search already holds for the position it searches next) ==
+Measured with a counter added to a scratch copy of the engine, not to engine/src. 2,000 simulations per search.
+Every bike played by the engine:
+  players 2: 5776 searches with a previous tree; visits already in it: mean 1235.7 (61.8%), median 1236, 10th pct 624, 90th pct 1856
+  players 4: 6577 searches (23 after a bike died, counted as 0); mean 807.9 (40.4%), median 745, 10th pct 263, 90th pct 1488
+One seat the engine, the others the alpha-beta engine at 10 ms:
+  players 2: 3927 searches; mean 936.2 (46.8%), median 883, 10th pct 289, 90th pct 1706
+  players 4: 2698 searches (3 after a bike died); mean 486.3 (24.3%), median 272, 10th pct 12, 90th pct 1341
+
+== Evaluation time (bin/tronzero-dev.exe bench) ==
+eval 25.84 us (features 3.87 us); features through canvas 6.91, conv0 14.76, conv1 19.35 us
+search 33.28 us per simulation, 0.99 evaluations per simulation
+
+== Paste size ==
+Weights now: 800,640 bits fixed width = 57,189 characters at 14 bits each.
+At 15 bits per character: 53,376. With a Rice code per output channel as well: 699,401 bits = 46,627 characters.
+Renaming the paste's own identifiers: about 6,500 characters (rough count).
+Stripped optimised Windows build of the paste, xz -9e: 261,256 bytes = about 139,000 characters at 15 bits (a native submission would not fit).

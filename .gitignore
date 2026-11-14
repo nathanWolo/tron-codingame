@@ -1,0 +1,25 @@
+# built, generated or downloaded
+/bin/
+/refs/
+/engine/target/
+/engine/src/baseline_src.rs
+/video/out/
+/.claude/
+__pycache__/
+*.pyc
+
+# training runs: networks and logs are kept, self-play data and trainer state are not
+/runs/*/data/
+/runs/*/ckpt.pkl
+/runs/*/STOP
+/runs/*/PAUSE
+/runs/parity/
+/runs/smoke/
+/runs/r1/bench_net.bin
+/runs/r1/nets/*
+!/runs/r1/nets/0042.bin
+
+# the gate's two sides are copies of a build and a network; their ABOUT.txt says which
+/gate/*/tronzero.exe
+/gate/*/tronzero
+/gate/*/net.bin

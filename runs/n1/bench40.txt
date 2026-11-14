@@ -1,0 +1,19 @@
+## --players 4 --pairs 100 --budget-ms 20
+{"players": 4, "agents": 1, "budget_ms": 20, "win_rate_at_par": 0.2500, "sims_per_search": 1445, "openings": 100, "games": 400, "score": 0.6317, "ci95": 0.0298, "win_rate": 0.2775, "mean_rank": 2.105, "placed": [111, 166, 93, 30], "mean_plies": 538.9, "pairs_lost": 14, "pairs_split": 17, "pairs_won": 69}
+## --players 2 --pairs 200 --budget-ms 20
+{"players": 2, "agents": 1, "budget_ms": 20, "win_rate_at_par": 0.5000, "sims_per_search": 3692, "openings": 200, "games": 400, "score": 0.5950, "ci95": 0.0329, "win_rate": 0.5950, "mean_rank": 1.405, "placed": [238, 162, 0, 0], "mean_plies": 381.3, "pairs_lost": 7, "pairs_split": 148, "pairs_won": 45}
+## --players 3 --pairs 100 --budget-ms 20
+{"players": 3, "agents": 1, "budget_ms": 20, "win_rate_at_par": 0.3333, "sims_per_search": 2296, "openings": 100, "games": 300, "score": 0.6733, "ci95": 0.0335, "win_rate": 0.4567, "mean_rank": 1.653, "placed": [137, 130, 33, 0], "mean_plies": 469.3, "pairs_lost": 8, "pairs_split": 19, "pairs_won": 73}
+## --players 4 --agents 3 --pairs 50 --budget-ms 20
+{"players": 4, "agents": 3, "budget_ms": 20, "win_rate_at_par": 0.7500, "sims_per_search": 1514, "openings": 50, "games": 200, "score": 0.5683, "ci95": 0.0151, "win_rate": 0.8450, "mean_rank": 2.295, "placed": [169, 176, 164, 91], "mean_plies": 549.5, "pairs_lost": 2, "pairs_split": 9, "pairs_won": 39}
+## --players 4 --pairs 30 --budget-ms 100
+{"players": 4, "agents": 1, "budget_ms": 100, "win_rate_at_par": 0.2500, "sims_per_search": 9940, "openings": 30, "games": 120, "score": 0.6500, "ci95": 0.0550, "win_rate": 0.3083, "mean_rank": 2.050, "placed": [37, 52, 19, 12], "mean_plies": 548.5, "pairs_lost": 2, "pairs_split": 6, "pairs_won": 22}
+## sprt.py 4 players 20 ms
+n= 240  92-0-148   38.3% vs 25.0%  Elo +108.3 +/-  23.1  LOS 100.0%  LLR  +1.42 [-2.94,+2.94]  SPRT[0,10] 4p  NPS 95k vs 895k (0.1x)
+n= 240  92-0-148   38.3% vs 25.0%  Elo +108.3 +/-  23.1  LOS 100.0%  LLR  +1.42 [-2.94,+2.94]  SPRT[0,10] 4p  NPS 95k vs 895k (0.1x)
+time 202.2s  games/s 1.19
+search  NPS 95k vs 895k (0.1x)  dev 28697600 nodes / 302140ms  base 1040202775 nodes / 1161805ms
+FIXED match complete (no SPRT decision).
+## done
+## finals diagnostic, 4 players 20 ms (seed 7)
+{"players": 4, "agents": 1, "budget_ms": 20, "win_rate_at_par": 0.2500, "sims_per_search": 1775, "finals": 277, "finals_ahead": 120, "finals_ahead_won": 116, "finals_behind_won": 7, "openings": 100, "games": 400, "score": 0.6442, "ci95": 0.0295, "win_rate": 0.3100, "mean_rank": 2.067, "placed": [124, 155, 91, 30], "mean_plies": 540.3, "pairs_lost": 11, "pairs_split": 15, "pairs_won": 74}

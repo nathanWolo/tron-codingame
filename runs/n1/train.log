@@ -1,0 +1,51 @@
+config {'channels': '16,24,24', 'hidden': 96, 'seed': 0, 'sims': 64, 'samples_per_gen': 200000, 'threads': 14, 'temp_rounds': 10, 'mix': '1,1,3', 'noise_eps': 0.25, 'noise_alpha': 0.5, 'c_puct': 1.0, 'batch': 512, 'reuse': 4.0, 'lr': 0.001, 'weight_decay': 0.0001, 'capacity': 1000000, 'window_frac': 0.4, 'min_window': 200000, 'q_mix': 0.0, 'eval_every': 5, 'eval_pairs': 200, 'eval_players': '2,4', 'base_every': 10, 'base_pairs': 60, 'base_players': '2,4', 'base_budget_ms': 20, 'base_threads': 8, 'keep_data': 8, 'gens': 100000}
+parameters 105288, starting at generation 0
+gen    1 |   0.22M pos | 800 games (145/166/489), 270 plies, searched 0.80 | pol 0.938 (H 0.878) val 0.690 win-acc 0.541 | sp 53s dist 4s train 34s
+gen    2 |   0.48M pos | 741 games (135/151/455), 351 plies, searched 0.55 | pol 0.950 (H 0.864) val 0.400 win-acc 0.567 | sp 48s dist 4s train 39s
+gen    3 |   0.67M pos | 569 games (112/136/321), 347 plies, searched 0.55 | pol 0.949 (H 0.857) val 0.348 win-acc 0.603 | sp 35s dist 4s train 29s
+gen    4 |   0.88M pos | 576 games (115/126/335), 350 plies, searched 0.52 | pol 0.939 (H 0.850) val 0.330 win-acc 0.610 | sp 34s dist 4s train 30s
+gen    5 |   1.08M pos | 571 games (100/114/357), 351 plies, searched 0.53 | pol 0.927 (H 0.843) val 0.324 win-acc 0.604 | sp 33s dist 4s train 30s | vs gen 0: 2p 0.998 (199-1-0) 4p 0.775 (200-0-0)
+gen    6 |   1.28M pos | 570 games (122/103/345), 360 plies, searched 0.55 | pol 0.912 (H 0.833) val 0.322 win-acc 0.608 | sp 40s dist 4s train 30s
+gen    7 |   1.48M pos | 556 games (113/106/337), 356 plies, searched 0.54 | pol 0.900 (H 0.822) val 0.328 win-acc 0.604 | sp 34s dist 4s train 29s
+gen    8 |   1.61M pos | 561 games (114/97/350), 359 plies, searched 0.83 | pol 0.887 (H 0.811) val 0.342 win-acc 0.598 | sp 35s dist 3s train 20s
+STOP file found, exiting
+config {'channels': '16,24,24', 'hidden': 96, 'seed': 0, 'sims': 64, 'samples_per_gen': 200000, 'threads': 14, 'temp_rounds': 10, 'mix': '1,1,3', 'noise_eps': 0.25, 'noise_alpha': 0.5, 'c_puct': 1.0, 'batch': 512, 'reuse': 4.0, 'lr': 0.001, 'weight_decay': 0.0001, 'capacity': 1000000, 'window_frac': 0.4, 'min_window': 200000, 'q_mix': 0.0, 'eval_every': 5, 'eval_pairs': 100, 'eval_players': '2,4', 'base_every': 10, 'base_pairs': 60, 'base_players': '2,4', 'base_budget_ms': 20, 'base_threads': 8, 'keep_data': 8, 'gens': 100000}
+parameters 105288, starting at generation 8
+refilled the ring with 1000000 positions from 6 files
+gen    9 |   1.81M pos | 834 games (169/151/514), 360 plies, searched 0.82 | pol 0.878 (H 0.804) val 0.357 win-acc 0.589 | sp 50s dist 4s train 28s
+gen   10 |   2.02M pos | 847 games (161/173/513), 366 plies, searched 0.83 | pol 0.869 (H 0.797) val 0.367 win-acc 0.580 | sp 54s dist 4s train 28s | vs gen 0: 2p 0.995 (99-1-0) 4p 0.785 (100-0-0) | vs alpha-beta @20ms: 2p 0.533 (10-44-6) win 0.53 4p 0.592 (36-13-11) win 0.25
+gen   11 |   2.21M pos | 821 games (165/162/494), 355 plies, searched 0.83 | pol 0.864 (H 0.794) val 0.371 win-acc 0.576 | sp 43s dist 3s train 27s
+gen   12 |   2.42M pos | 843 games (165/178/500), 364 plies, searched 0.83 | pol 0.859 (H 0.791) val 0.374 win-acc 0.570 | sp 53s dist 4s train 30s
+gen   13 |   2.61M pos | 822 games (172/164/486), 355 plies, searched 0.83 | pol 0.853 (H 0.786) val 0.369 win-acc 0.576 | sp 44s dist 3s train 28s
+gen   14 |   2.81M pos | 848 games (160/161/527), 355 plies, searched 0.83 | pol 0.849 (H 0.783) val 0.366 win-acc 0.577 | sp 45s dist 4s train 29s
+gen   15 |   3.01M pos | 853 games (179/160/514), 359 plies, searched 0.83 | pol 0.844 (H 0.779) val 0.362 win-acc 0.577 | sp 52s dist 4s train 28s | vs gen 5: 2p 0.620 (26-72-2) 4p 0.563 (71-8-21)
+gen   16 |   3.21M pos | 834 games (184/160/490), 351 plies, searched 0.83 | pol 0.838 (H 0.773) val 0.364 win-acc 0.575 | sp 51s dist 3s train 27s
+gen   17 |   3.41M pos | 859 games (179/167/513), 354 plies, searched 0.83 | pol 0.835 (H 0.771) val 0.362 win-acc 0.577 | sp 51s dist 4s train 27s
+gen   18 |   3.61M pos | 859 games (174/174/511), 351 plies, searched 0.83 | pol 0.832 (H 0.768) val 0.359 win-acc 0.580 | sp 52s dist 4s train 27s
+gen   19 |   3.81M pos | 863 games (178/171/514), 358 plies, searched 0.83 | pol 0.827 (H 0.763) val 0.357 win-acc 0.580 | sp 55s dist 4s train 28s
+gen   20 |   4.01M pos | 841 games (169/156/516), 348 plies, searched 0.83 | pol 0.821 (H 0.758) val 0.355 win-acc 0.582 | sp 51s dist 3s train 27s | vs gen 10: 2p 0.570 (19-76-5) 4p 0.543 (68-8-24) | vs alpha-beta @20ms: 2p 0.575 (11-47-2) win 0.57 4p 0.613 (42-8-10) win 0.27
+gen   21 |   4.21M pos | 864 games (176/168/520), 349 plies, searched 0.83 | pol 0.816 (H 0.753) val 0.349 win-acc 0.588 | sp 53s dist 4s train 29s
+gen   22 |   4.40M pos | 857 games (178/173/506), 350 plies, searched 0.82 | pol 0.813 (H 0.751) val 0.345 win-acc 0.588 | sp 52s dist 3s train 28s
+gen   23 |   4.61M pos | 870 games (166/177/527), 351 plies, searched 0.83 | pol 0.809 (H 0.747) val 0.340 win-acc 0.589 | sp 52s dist 4s train 29s
+gen   24 |   4.81M pos | 861 games (157/167/537), 355 plies, searched 0.83 | pol 0.807 (H 0.745) val 0.341 win-acc 0.588 | sp 51s dist 4s train 29s
+gen   25 |   5.00M pos | 851 games (176/173/502), 350 plies, searched 0.83 | pol 0.804 (H 0.743) val 0.341 win-acc 0.588 | sp 50s dist 3s train 29s | vs gen 15: 2p 0.540 (14-80-6) 4p 0.512 (54-9-37)
+gen   26 |   5.21M pos | 865 games (174/183/508), 353 plies, searched 0.83 | pol 0.802 (H 0.741) val 0.343 win-acc 0.588 | sp 52s dist 4s train 28s
+gen   27 |   5.41M pos | 852 games (161/159/532), 360 plies, searched 0.83 | pol 0.801 (H 0.740) val 0.342 win-acc 0.589 | sp 53s dist 4s train 29s
+gen   28 |   5.61M pos | 831 games (158/162/511), 354 plies, searched 0.84 | pol 0.798 (H 0.737) val 0.346 win-acc 0.587 | sp 51s dist 4s train 28s
+gen   29 |   5.81M pos | 839 games (162/179/498), 354 plies, searched 0.83 | pol 0.796 (H 0.735) val 0.345 win-acc 0.594 | sp 45s dist 4s train 27s
+gen   30 |   6.00M pos | 851 games (180/160/511), 344 plies, searched 0.84 | pol 0.794 (H 0.733) val 0.338 win-acc 0.600 | sp 50s dist 3s train 27s | vs gen 20: 2p 0.535 (12-83-5) 4p 0.496 (37-18-45) | vs alpha-beta @20ms: 2p 0.558 (9-49-2) win 0.56 4p 0.633 (37-15-8) win 0.33
+gen   31 |   6.21M pos | 866 games (162/160/544), 365 plies, searched 0.83 | pol 0.793 (H 0.732) val 0.340 win-acc 0.598 | sp 53s dist 4s train 28s
+STOP file found, exiting
+config {'channels': '16,24,24', 'hidden': 96, 'seed': 0, 'sims': 128, 'samples_per_gen': 200000, 'threads': 14, 'temp_rounds': 10, 'mix': '1,1,3', 'noise_eps': 0.25, 'noise_alpha': 0.5, 'c_puct': 1.0, 'batch': 512, 'reuse': 4.0, 'lr': 0.0003, 'weight_decay': 0.0001, 'capacity': 1000000, 'window_frac': 0.4, 'min_window': 200000, 'q_mix': 0.0, 'eval_every': 5, 'eval_pairs': 100, 'eval_players': '2,4', 'base_every': 10, 'base_pairs': 60, 'base_players': '2,4', 'base_budget_ms': 20, 'base_threads': 8, 'keep_data': 8, 'gens': 100000}
+parameters 105288, starting at generation 31
+refilled the ring with 1000000 positions from 5 files
+gen   32 |   6.41M pos | 829 games (166/176/487), 354 plies, searched 0.83 | pol 0.786 (H 0.725) val 0.336 win-acc 0.601 | sp 93s dist 3s train 28s
+gen   33 |   6.61M pos | 851 games (169/179/503), 362 plies, searched 0.84 | pol 0.781 (H 0.718) val 0.334 win-acc 0.607 | sp 87s dist 4s train 30s
+gen   34 |   6.81M pos | 825 games (173/159/493), 360 plies, searched 0.83 | pol 0.774 (H 0.710) val 0.334 win-acc 0.604 | sp 97s dist 4s train 30s
+gen   35 |   7.01M pos | 832 games (141/181/510), 364 plies, searched 0.82 | pol 0.770 (H 0.704) val 0.336 win-acc 0.600 | sp 102s dist 4s train 30s | vs gen 25: 2p 0.505 (7-87-6) 4p 0.517 (52-13-35)
+gen   36 |   7.21M pos | 835 games (169/163/503), 361 plies, searched 0.83 | pol 0.764 (H 0.697) val 0.334 win-acc 0.601 | sp 101s dist 4s train 30s
+gen   37 |   7.41M pos | 832 games (145/177/510), 365 plies, searched 0.83 | pol 0.760 (H 0.694) val 0.332 win-acc 0.602 | sp 101s dist 4s train 31s
+gen   38 |   7.61M pos | 828 games (159/157/512), 359 plies, searched 0.84 | pol 0.759 (H 0.694) val 0.329 win-acc 0.600 | sp 101s dist 4s train 29s
+gen   39 |   7.81M pos | 832 games (180/150/502), 360 plies, searched 0.84 | pol 0.755 (H 0.690) val 0.326 win-acc 0.601 | sp 87s dist 4s train 30s
+gen   40 |   8.01M pos | 819 games (170/162/487), 358 plies, searched 0.84 | pol 0.753 (H 0.688) val 0.322 win-acc 0.607 | sp 83s dist 4s train 29s | vs gen 30: 2p 0.505 (9-83-8) 4p 0.517 (51-14-35) | vs alpha-beta @20ms: 2p 0.575 (11-47-2) win 0.57 4p 0.636 (39-12-9) win 0.33
+STOP file found, exiting

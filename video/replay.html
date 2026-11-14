@@ -1,0 +1,752 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tron replay</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #06080c; color: #d7dde8; font: 14px "Segoe UI", system-ui, sans-serif; }
+  #wrap { display: flex; flex-direction: column; height: 100%; }
+  #stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 10px; }
+  canvas { max-width: 100%; max-height: 100%; aspect-ratio: 16 / 9; border-radius: 6px; box-shadow: 0 0 0 1px #1c2230; }
+  #bar { display: flex; gap: 10px; align-items: center; padding: 8px 12px; background: #0f131b; border-top: 1px solid #1c2230; flex-wrap: wrap; }
+  button, select { background: #1a2130; color: inherit; border: 1px solid #2a3346; border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; }
+  button:hover, select:hover { border-color: #3ec6ff; }
+  input[type=range] { flex: 1; min-width: 160px; accent-color: #3ec6ff; }
+  #clock, #status { color: #8b95a8; font-variant-numeric: tabular-nums; white-space: nowrap; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage"><canvas id="cv" width="1920" height="1080"></canvas></div>
+  <div id="bar">
+    <select id="games" title="Recorded game"></select>
+    <button id="play" title="Play or pause (Space); arrow keys step a frame, with Shift a second">Play</button>
+    <input id="scrub" type="range" min="0" max="1000" value="0" step="1">
+    <span id="clock">0.0 s</span>
+    <select id="speed" title="Playback speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+    <button id="frame" title="Save this frame as a PNG in video/out">Save frame</button>
+    <button id="export" title="Encode the replay as an MP4 and save it in video/out">Export MP4</button>
+    <span id="status"></span>
+  </div>
+</div>
+<script>
+'use strict';
+// Replay of a game recorded by tools/record_game.py. Everything on the canvas is a pure function of
+// the time t in seconds, so the same draw(t) serves playback, scrubbing and the frame-by-frame export.
+
+const W = 1920, H = 1080, FPS = 30;
+const cv = document.getElementById('cv');
+const g = cv.getContext('2d');
+
+// Colours are those of tron-codingame's tools/watch.py: the candidate is cyan whatever its seat.
+const AGENT = { trail: '#3ec6ff', head: '#dff6ff', zone: '#123544' };
+const BOTS = [
+  { trail: '#ff9f1c', head: '#ffe0b0', zone: '#3a2a10' },
+  { trail: '#ff5d8f', head: '#ffd0e0', zone: '#3a1524' },
+  { trail: '#c4f542', head: '#e8ffb0', zone: '#2a3510' },
+];
+const C = { bg: '#090c12', empty: '#10141c', grid: '#1c2230', contested: '#2a2430', panel: '#121722', track: '#0e121a',
+            fg: '#d7dde8', muted: '#8b95a8', dim: '#5b6578', cut: '#ff6b6b' };
+const HEAD = '"Bahnschrift", "Segoe UI", system-ui, sans-serif';
+const MONO = '"Cascadia Mono", "Consolas", monospace';
+
+// Layout, in canvas pixels.
+const CELL = 40, BX = 40, BY = 130;
+const BAR = { x: 1258, w: 40 };
+const PX = 1330, PW = 550;
+const INTRO = 2.0, OUTRO = 4.2, TARGET = 30, FAST = 3;
+
+let G = null;
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, u) => a + (b - a) * u;
+const smooth = u => { u = clamp(u, 0, 1); return u * u * (3 - 2 * u); };
+const num = v => Math.round(v).toLocaleString('en-US');
+const signed = v => (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(2);
+const ordinal = k => ['', '1st', '2nd', '3rd', '4th'][k] || k + 'th';
+function rgba(hex, a) {
+  const v = parseInt(hex.slice(1), 16);
+  return `rgba(${v >> 16},${(v >> 8) & 255},${v & 255},${a})`;
+}
+/** Number of entries of the ascending array `a` that are <= t. */
+function countUpTo(a, t) {
+  let lo = 0, hi = a.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] <= t) lo = m + 1; else hi = m; }
+  return lo;
+}
+
+// ---------------------------------------------------------------- the game
+
+function prepare(game) {
+  const n = game.meta.players, seat = game.meta.agent_seat;
+  const bw = game.meta.width, bh = game.meta.height;
+  const plies = game.plies;
+  const rounds = plies.length ? plies[plies.length - 1].round + 1 : 0;
+  const movers = new Array(rounds).fill(0);
+  for (const p of plies) movers[p.round]++;
+  // A round always takes the same time, so every bike moves at one speed, until the agent has run
+  // its last search: from then on it is walled off and only fills its space, and the rest of the
+  // game plays FAST times faster.
+  let lastSearch = -1;
+  for (const p of plies) if (p.p === seat && p.stat && p.stat.mode === 'search') lastSearch = p.round;
+  const fastFrom = rounds - lastSearch > 14 ? lastSearch + 2 : rounds;
+  const tr = clamp(TARGET / Math.max(fastFrom + (rounds - fastFrom) / FAST, 1), 0.1, 0.25);
+  const roundStart = [INTRO], roundTime = [];
+  for (let r = 0; r < rounds; r++) { roundTime.push(r < fastFrom ? tr : tr / FAST); roundStart.push(roundStart[r] + roundTime[r]); }
+  const time = [], next = new Array(plies.length).fill(-1), lastOf = new Array(n).fill(-1);
+  const trail = game.starts.map(c => [{ x: c[0], y: c[1], ply: -1 }]);
+  const deathPly = new Array(n).fill(Infinity), place = new Array(n).fill(0);
+  let inRound = 0, round = -1, left = n;
+  plies.forEach((p, i) => {
+    if (p.round !== round) { round = p.round; inRound = 0; }
+    time.push(roundStart[p.round] + roundTime[p.round] * inRound / movers[p.round]);
+    inRound++;
+    if (lastOf[p.p] >= 0) next[lastOf[p.p]] = i;
+    lastOf[p.p] = i;
+    if (p.died) { deathPly[p.p] = i; place[p.p] = left; left--; }
+    else trail[p.p].push({ x: p.x, y: p.y, ply: i });
+  });
+  const winner = game.over ? game.over.winner : null;
+  if (winner !== null && winner !== undefined) place[winner] = 1;
+  const end = plies.length ? time[time.length - 1] + roundTime[rounds - 1] : INTRO;
+  const fastT = fastFrom < rounds ? roundStart[fastFrom] : Infinity;
+  // What the agent printed, move by move.
+  const said = [];
+  plies.forEach((p, i) => { if (p.p === seat && p.stat) said.push(Object.assign({ i, t: time[i], round: p.round, mv: p.mv }, p.stat)); });
+  const searches = said.filter(s => s.mode === 'search');
+  const botSaid = Array.from({ length: n }, () => []);
+  plies.forEach((p, i) => { if (p.p !== seat && p.stat && p.stat.mode === 'ab') botSaid[p.p].push({ t: time[i], depth: p.stat.depth, nodes: p.stat.nodes }); });
+  let b = 0;
+  const colour = [];
+  for (let p = 0; p < n; p++) colour.push(p === seat ? AGENT : BOTS[b++ % BOTS.length]);
+  return { game, n, seat, bw, bh, plies, rounds, tr, roundTime, fastT, time, next, trail, deathPly, place, winner, end, said, searches, botSaid,
+           colour, labels: game.meta.labels, duration: end + OUTRO, saidT: said.map(s => s.t), searchT: searches.map(s => s.t),
+           boards: new Map(), zones: new Map() };
+}
+
+/** The position after k plies: who holds each cell, the heads, who is in. */
+function boardAt(k) {
+  let b = G.boards.get(k);
+  if (b) return b;
+  const occ = new Int8Array(G.bw * G.bh).fill(-1), heads = [], alive = [];
+  for (let p = 0; p < G.n; p++) {
+    alive.push(G.deathPly[p] >= k);
+    const cells = G.trail[p];
+    let last = cells[0];
+    for (const c of cells) { if (c.ply >= k) break; last = c; if (alive[p]) occ[c.y * G.bw + c.x] = p; }
+    heads.push(last);
+  }
+  b = { occ, heads, alive };
+  if (G.boards.size > 2000) G.boards.clear();
+  G.boards.set(k, b);
+  return b;
+}
+
+/** Who reaches each empty cell first (as tools/watch.py's `analyse`): -2 nobody, -1 a tie. */
+function zonesAt(k) {
+  let z = G.zones.get(k);
+  if (z) return z;
+  const { occ, heads, alive } = boardAt(k);
+  const N = G.bw * G.bh, best = new Int16Array(N).fill(32767), owner = new Int8Array(N).fill(-2), territory = new Array(G.n).fill(0);
+  const dist = new Int16Array(N), queue = new Int32Array(N);
+  for (let p = 0; p < G.n; p++) {
+    if (!alive[p]) continue;
+    dist.fill(-1);
+    let qh = 0, qt = 0;
+    const push = (x, y, d) => {
+      if (x < 0 || y < 0 || x >= G.bw || y >= G.bh) return;
+      const i = y * G.bw + x;
+      if (occ[i] >= 0 || dist[i] >= 0) return;
+      dist[i] = d; queue[qt++] = i;
+    };
+    const h = heads[p];
+    push(h.x, h.y - 1, 1); push(h.x, h.y + 1, 1); push(h.x - 1, h.y, 1); push(h.x + 1, h.y, 1);
+    while (qh < qt) {
+      const i = queue[qh++], x = i % G.bw, y = (i / G.bw) | 0, d = dist[i] + 1;
+      push(x, y - 1, d); push(x, y + 1, d); push(x - 1, y, d); push(x + 1, y, d);
+      if (dist[i] < best[i]) { best[i] = dist[i]; owner[i] = p; }
+      else if (dist[i] === best[i]) owner[i] = -1;
+    }
+  }
+  for (let i = 0; i < N; i++) if (owner[i] >= 0) territory[owner[i]]++;
+  z = { owner, territory };
+  G.zones.set(k, z);
+  return z;
+}
+
+// ---------------------------------------------------------------- drawing helpers
+
+function font(px, weight = 500, family = HEAD) { g.font = `${weight} ${px}px ${family}`; }
+function text(s, x, y, colour, align = 'left', spacing = 0) {
+  g.fillStyle = colour; g.textAlign = align; g.letterSpacing = spacing + 'px';
+  g.fillText(s, x, y);
+  g.letterSpacing = '0px';
+}
+/** Digits in slots of equal width, right-aligned at x, so a changing number does not shiver. */
+function digits(s, x, y, colour, adv) {
+  g.fillStyle = colour; g.textAlign = 'center';
+  let cx = x;
+  for (let i = s.length - 1; i >= 0; i--) {
+    const ch = s[i], w = (ch === ',' || ch === '.') ? adv * 0.5 : adv;
+    g.fillText(ch, cx - w / 2, y);
+    cx -= w;
+  }
+  return x - cx;
+}
+function panel(x, y, w, h, r = 12, fill = C.panel) {
+  g.beginPath(); g.roundRect(x, y, w, h, r); g.fillStyle = fill; g.fill();
+}
+const cx = c => BX + c.x * CELL + CELL / 2, cy = c => BY + c.y * CELL + CELL / 2;
+
+// ---------------------------------------------------------------- the frame
+
+function draw(t) {
+  if (!G) return;
+  t = clamp(t, 0, G.duration);
+  const k = countUpTo(G.time, t);
+  const over = t >= G.end;
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalAlpha = 1; g.shadowBlur = 0;
+  g.fillStyle = C.bg; g.fillRect(0, 0, W, H);
+  const glow = g.createRadialGradient(BX + 600, BY + 400, 100, BX + 600, BY + 400, 1100);
+  glow.addColorStop(0, 'rgba(62,198,255,0.07)'); glow.addColorStop(1, 'rgba(62,198,255,0)');
+  g.fillStyle = glow; g.fillRect(0, 0, W, H);
+  g.textBaseline = 'alphabetic';
+
+  drawHeader(t, k, over);
+  drawBoard(t, k, over);
+  drawEvalBar(t, over);
+  drawEvalGraph(t, over);
+  drawTree(t, k, over);
+  drawLegend(t, k);
+  if (over) drawBanner(t);
+}
+
+function drawHeader(t, k, over) {
+  let x = BX;
+  const put = (s, px, weight, colour, spacing, gap) => {
+    font(px, weight);
+    text(s, x, 92, colour, 'left', spacing);
+    x += g.measureText(s).width + spacing * s.length + gap;
+  };
+  put('TRONZERO', 64, 700, AGENT.trail, 5, 20);
+  put('vs', 40, 400, C.muted, 0, 20);
+  put(`${G.n - 1} × ALPHA-BETA`, 40, 600, C.fg, 2, 44);
+  if (t >= G.fastT && !over) {
+    // Fast-forward mark, left of the round counter.
+    const fx = 1700, fy = 44;
+    g.fillStyle = AGENT.trail;
+    for (const dx of [0, 17]) { g.beginPath(); g.moveTo(fx + dx, fy - 11); g.lineTo(fx + dx + 15, fy); g.lineTo(fx + dx, fy + 11); g.closePath(); g.fill(); }
+    font(26, 700);
+    text(FAST + '×', fx + 42, fy + 9, AGENT.trail);
+  }
+  const round = G.plies.length ? G.plies[Math.min(Math.max(k - 1, 0), G.plies.length - 1)].round + 1 : 0;
+  font(22, 500);
+  text('ROUND', 1880, 52, C.muted, 'right', 3);
+  font(54, 600, MONO);
+  digits(String(t < INTRO ? 0 : round), 1880, 100, C.fg, 32);
+}
+
+function drawBoard(t, k, over) {
+  const bw = G.bw, bh = G.bh, { alive } = boardAt(k), zones = zonesAt(k);
+  panel(BX - 8, BY - 8, bw * CELL + 16, bh * CELL + 16, 14, '#0c1017');
+  // Empty cells, tinted by who gets there first.
+  for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+    const o = zones.owner[y * bw + x];
+    g.fillStyle = o >= 0 ? G.colour[o].zone : o === -1 ? C.contested : C.empty;
+    g.fillRect(BX + x * CELL + 1, BY + y * CELL + 1, CELL - 2, CELL - 2);
+  }
+  drawExpected(t, k);
+  // Bikes that went out a moment ago fade; the others are drawn whole.
+  for (let p = 0; p < G.n; p++) {
+    const dp = G.deathPly[p];
+    if (alive[p]) drawBike(p, t, k, 1);
+    else {
+      const age = t - G.time[dp];
+      if (age < 0.7) drawBike(p, t, dp, 1 - smooth(age / 0.7));
+    }
+  }
+  for (let p = 0; p < G.n; p++) {
+    const dp = G.deathPly[p];
+    if (dp === Infinity || alive[p]) continue;
+    const age = t - G.time[dp];
+    if (age >= 0.9) continue;
+    const h = boardAt(dp).heads[p], u = age / 0.9;
+    g.save();
+    g.globalAlpha = 1 - u;
+    g.strokeStyle = G.colour[p].head; g.lineWidth = 6 * (1 - u) + 1;
+    g.shadowColor = G.colour[p].trail; g.shadowBlur = 30;
+    g.beginPath(); g.arc(cx(h), cy(h), CELL * (0.5 + 2.6 * smooth(u)), 0, Math.PI * 2); g.stroke();
+    g.beginPath(); g.arc(cx(h), cy(h), CELL * (0.3 + 1.2 * smooth(u)), 0, Math.PI * 2); g.stroke();
+    g.restore();
+  }
+  // Name tags while the bikes wait on their spawns.
+  const tag = t < INTRO ? 1 : 1 - smooth((t - INTRO) / 0.8);
+  if (tag > 0) for (let p = 0; p < G.n; p++) {
+    const c = G.trail[p][0], below = c.y < 3, x = clamp(cx(c), BX + 110, BX + bw * CELL - 110), y = cy(c) + (below ? 62 : -46);
+    g.save(); g.globalAlpha = tag;
+    const pulse = (t * 1.4) % 1;
+    g.strokeStyle = G.colour[p].trail; g.lineWidth = 3; g.globalAlpha = tag * (1 - pulse);
+    g.beginPath(); g.arc(cx(c), cy(c), CELL * (0.5 + 1.3 * pulse), 0, Math.PI * 2); g.stroke();
+    g.globalAlpha = tag;
+    font(26, 600);
+    const label = G.labels[p], tw = g.measureText(label).width + 28;
+    panel(x - tw / 2, y - 28, tw, 40, 8, 'rgba(9,12,18,0.88)');
+    g.strokeStyle = G.colour[p].trail; g.lineWidth = 2; g.beginPath(); g.roundRect(x - tw / 2, y - 28, tw, 40, 8); g.stroke();
+    text(label, x, y, G.colour[p].trail, 'center');
+    g.restore();
+  }
+}
+
+/** One bike after k plies: its cells, its ribbon, and the head on its way into the newest cell. */
+function drawBike(p, t, k, alpha) {
+  const col = G.colour[p], cells = [];
+  for (const c of G.trail[p]) { if (c.ply >= k) break; cells.push(c); }
+  const last = cells[cells.length - 1];
+  let hx = cx(last), hy = cy(last), u = 1;
+  if (cells.length > 1 && last.ply >= 0) {
+    const until = G.next[last.ply] >= 0 ? G.time[G.next[last.ply]] : G.time[last.ply] + G.roundTime[G.plies[last.ply].round];
+    u = clamp((t - G.time[last.ply]) / Math.max(until - G.time[last.ply], 1e-6), 0, 1);
+    const prev = cells[cells.length - 2];
+    hx = lerp(cx(prev), cx(last), u); hy = lerp(cy(prev), cy(last), u);
+  }
+  g.save();
+  g.globalAlpha = alpha;
+  g.fillStyle = rgba(col.trail, 0.24);
+  cells.forEach((c, i) => {
+    if (i === cells.length - 1 && u < 1) g.fillStyle = rgba(col.trail, 0.24 * u);
+    g.fillRect(BX + c.x * CELL + 1, BY + c.y * CELL + 1, CELL - 2, CELL - 2);
+  });
+  g.lineJoin = 'round'; g.lineCap = 'round';
+  g.beginPath();
+  g.moveTo(cx(cells[0]), cy(cells[0]));
+  for (let i = 1; i < cells.length - 1; i++) g.lineTo(cx(cells[i]), cy(cells[i]));
+  g.lineTo(hx, hy);
+  g.strokeStyle = col.trail; g.lineWidth = CELL * 0.44;
+  g.shadowColor = col.trail; g.shadowBlur = 20;
+  g.stroke();
+  g.shadowBlur = 0;
+  g.strokeStyle = rgba(col.head, 0.55); g.lineWidth = CELL * 0.1;
+  g.stroke();
+  // The head.
+  g.shadowColor = col.trail; g.shadowBlur = 34;
+  g.fillStyle = col.head;
+  g.beginPath(); g.arc(hx, hy, CELL * 0.36, 0, Math.PI * 2); g.fill();
+  g.shadowBlur = 0;
+  if (p === G.seat) {
+    g.strokeStyle = rgba('#ffffff', 0.9); g.lineWidth = 3;
+    g.beginPath(); g.arc(hx, hy, CELL * 0.56, 0, Math.PI * 2); g.stroke();
+  }
+  g.restore();
+}
+
+/** The moves the agent's search expects next, for every bike: its most-visited line. */
+function drawExpected(t, k) {
+  // Before the first move the plan of the first search is already on the board.
+  const i = Math.max(countUpTo(G.searchT, t) - 1, 0);
+  if (!G.searches.length || G.deathPly[G.seat] < k) return;
+  const s = G.searches[i];
+  if (t - s.t > 2 * G.tr || t >= G.end) return;
+  const at = boardAt(s.i), now = boardAt(k);
+  const lines = Array.from({ length: G.n }, (_, p) => [at.heads[p]]);
+  s.pv.slice(0, 40).forEach(step => lines[step[0]].push({ x: step[1], y: step[2] }));
+  g.save();
+  g.lineJoin = 'round'; g.lineCap = 'round';
+  for (let p = 0; p < G.n; p++) {
+    const pts = lines[p];
+    if (pts.length < 2 || !now.alive[p]) continue;
+    const mine = p === G.seat;
+    g.strokeStyle = rgba(G.colour[p].trail, mine ? 0.55 : 0.3);
+    g.lineWidth = mine ? 4 : 3;
+    g.setLineDash([2, 10]);
+    g.beginPath(); g.moveTo(cx(pts[0]), cy(pts[0]));
+    for (let j = 1; j < pts.length; j++) g.lineTo(cx(pts[j]), cy(pts[j]));
+    g.stroke();
+    g.setLineDash([]);
+    for (let j = 1; j < pts.length; j++) {
+      g.fillStyle = rgba(G.colour[p].trail, (mine ? 0.9 : 0.5) * (1 - 0.6 * j / pts.length));
+      g.beginPath(); g.arc(cx(pts[j]), cy(pts[j]), mine ? 5 : 4, 0, Math.PI * 2); g.fill();
+    }
+  }
+  g.restore();
+}
+
+/** The agent's value of its own position at time t: its last search, eased in from the one before. */
+function evalAt(t, over) {
+  const i = countUpTo(G.searchT, t) - 1;
+  let v = 0;
+  if (i >= 0) {
+    const s = G.searches[i], before = G.searches[Math.max(i - 1, 0)].v[G.seat];
+    v = lerp(before, s.v[G.seat], smooth((t - s.t) / Math.min(G.tr, 0.25)));
+  } else if (G.searches.length) {
+    v = G.searches[0].v[G.seat];  // the first search runs before the first move
+  }
+  if (over && G.winner !== null && G.winner !== undefined) v = lerp(v, G.winner === G.seat ? 1 : -1, smooth((t - G.end) / 0.6));
+  return clamp(v, -1, 1);
+}
+
+function drawEvalBar(t, over) {
+  const x = BAR.x, y = BY, w = BAR.w, h = G.bh * CELL, v = evalAt(t, over);
+  panel(x, y, w, h, 10, C.track);
+  const fill = h * (v + 1) / 2;
+  g.save();
+  g.beginPath(); g.roundRect(x, y, w, h, 10); g.clip();
+  const grad = g.createLinearGradient(0, y + h - fill, 0, y + h);
+  grad.addColorStop(0, '#5fd4ff'); grad.addColorStop(1, '#17658f');
+  g.fillStyle = grad; g.fillRect(x, y + h - fill, w, fill);
+  g.fillStyle = '#eaf9ff'; g.shadowColor = AGENT.trail; g.shadowBlur = 18;
+  g.fillRect(x, y + h - fill - 2, w, 4);
+  g.restore();
+  g.strokeStyle = C.grid; g.lineWidth = 2; g.beginPath(); g.roundRect(x, y, w, h, 10); g.stroke();
+  g.fillStyle = rgba('#ffffff', 0.55); g.fillRect(x - 5, y + h / 2 - 1, w + 10, 2);
+  font(18, 600);
+  text('+1', x + w / 2, y + 26, v > 0.9 ? '#06202d' : C.muted, 'center');
+  text('−1', x + w / 2, y + h - 12, v > -0.94 ? '#06202d' : C.muted, 'center');
+}
+
+function drawEvalGraph(t, over) {
+  const v = evalAt(t, over);
+  font(22, 600);
+  text("TRONZERO'S EVAL", PX, 168, C.muted, 'left', 3);
+  font(60, 600, MONO);
+  digits(signed(v), PX + PW, 180, AGENT.trail, 35);
+  const x = PX, y = 204, w = PW, h = 212;
+  panel(x, y, w, h, 10, C.track);
+  const X = time => x + 14 + (w - 28) * clamp((time - INTRO) / (G.end - INTRO), 0, 1);
+  const Y = val => y + h / 2 - clamp(val, -1, 1) * (h / 2 - 16);
+  g.strokeStyle = C.grid; g.lineWidth = 1;
+  for (const val of [-1, 1]) { g.beginPath(); g.moveTo(x + 10, Y(val)); g.lineTo(x + w - 10, Y(val)); g.stroke(); }
+  g.strokeStyle = rgba('#ffffff', 0.28); g.beginPath(); g.moveTo(x + 10, Y(0)); g.lineTo(x + w - 10, Y(0)); g.stroke();
+  const upto = countUpTo(G.searchT, t);
+  g.save();
+  g.lineJoin = 'round'; g.lineCap = 'round';
+  // How the agent rates each of the others, faint; then itself.
+  for (let p = 0; p < G.n; p++) {
+    if (p === G.seat) continue;
+    const stop = G.deathPly[p] === Infinity ? Infinity : G.time[G.deathPly[p]];
+    g.strokeStyle = rgba(G.colour[p].trail, 0.5); g.lineWidth = 2;
+    g.beginPath();
+    let started = false;
+    for (let i = 0; i < upto; i++) {
+      const s = G.searches[i];
+      if (s.t > stop || s.v[p] < -1.001) break;
+      if (started) g.lineTo(X(s.t), Y(s.v[p])); else { g.moveTo(X(s.t), Y(s.v[p])); started = true; }
+    }
+    g.stroke();
+  }
+  for (let p = 0; p < G.n; p++) {
+    const dp = G.deathPly[p];
+    if (dp === Infinity || G.time[dp] > t) continue;
+    g.strokeStyle = rgba(G.colour[p].trail, 0.75); g.lineWidth = 2; g.setLineDash([4, 5]);
+    g.beginPath(); g.moveTo(X(G.time[dp]), y + 8); g.lineTo(X(G.time[dp]), y + h - 8); g.stroke();
+    g.setLineDash([]);
+  }
+  if (upto > 0) {
+    g.strokeStyle = AGENT.trail; g.lineWidth = 4; g.shadowColor = AGENT.trail; g.shadowBlur = 12;
+    g.beginPath(); g.moveTo(X(G.searches[0].t), Y(G.searches[0].v[G.seat]));
+    for (let i = 1; i < upto - 1; i++) g.lineTo(X(G.searches[i].t), Y(G.searches[i].v[G.seat]));
+    const tip = Math.min(t, G.end);
+    g.lineTo(X(tip), Y(v));
+    g.stroke();
+    g.fillStyle = AGENT.head; g.beginPath(); g.arc(X(tip), Y(v), 6, 0, Math.PI * 2); g.fill();
+  }
+  g.restore();
+}
+
+function drawTree(t, k, over) {
+  const top = 444;
+  const j = countUpTo(G.saidT, t) - 1, i = Math.max(countUpTo(G.searchT, t) - 1, 0);
+  const mode = j >= 0 ? G.said[j].mode : 'search';
+  const out = G.deathPly[G.seat] < k;
+  if (!G.searches.length) return;
+  const s = G.searches[i], prev = G.searches[Math.max(i - 1, 0)];
+  // Alone in its region the agent fills space without a search, and with one legal move it just
+  // plays it; when that lasts, the last tree stays on screen, dimmed.
+  const idle = out || (mode !== 'search' && (mode === 'fill' || over || t - s.t > 2.5 * G.tr));
+  font(22, 600);
+  text('SEARCH TREE', PX, top + 22, C.muted, 'left', 3);
+  if (idle) {
+    font(20, 400);
+    text(out ? 'out' : mode === 'fill' ? 'walled off · no search' : 'one legal move', PX + PW, top + 22, AGENT.trail, 'right');
+  }
+  const u = smooth((t - s.t) / Math.min(G.tr, 0.25));
+  g.save();
+  g.globalAlpha = idle ? 0.4 : 1;
+  // Three figures.
+  const tiles = [['SIMULATIONS', num(s.sims)], ['DEEPEST LINE', String(s.maxd)], ['MEAN DEPTH', s.avgd.toFixed(1)]];
+  const tw = (PW - 24) / 3;
+  tiles.forEach(([label, value], q) => {
+    const x = PX + q * (tw + 12);
+    panel(x, top + 40, tw, 96, 10, C.panel);
+    font(17, 600);
+    text(label, x + 14, top + 68, C.muted, 'left', 1.5);
+    font(46, 600, MONO);
+    digits(value, x + tw - 14, top + 120, C.fg, 27);
+  });
+  // The tree's shape: nodes at each depth, the root on top.
+  const sy = top + 156, sh = 326;
+  panel(PX, sy, PW, sh, 10, C.track);
+  const rows = Math.max(s.dh.length, prev.dh.length, 8);
+  const shape = [];
+  let widest = 1;
+  for (let d = 0; d < rows; d++) { shape.push(lerp(prev.dh[d] || 0, s.dh[d] || 0, u)); widest = Math.max(widest, shape[d]); }
+  const rh = Math.min(22, (sh - 46) / rows), mid = PX + PW / 2 + 24, half = PW / 2 - 70;
+  const tick = [1, 2, 5, 10, 20, 50, 100].find(step => step * rh >= 24) || 100;
+  font(15, 500);
+  text('DEPTH', PX + 14, sy + 24, C.dim, 'left', 1.5);
+  text('NODES AT EACH DEPTH', PX + PW - 14, sy + 24, C.dim, 'right', 1.5);
+  for (let d = 0; d < rows; d++) {
+    const wd = Math.max(shape[d] > 0.5 ? 3 : 0, half * 2 * shape[d] / widest), y = sy + 36 + d * rh;
+    if (y + rh > sy + sh - 6) break;
+    g.fillStyle = rgba(AGENT.trail, 0.35 + 0.65 * shape[d] / widest);
+    g.beginPath(); g.roundRect(mid - wd / 2, y + 1, wd, Math.max(rh - 3, 2), Math.min(4, rh / 2)); g.fill();
+    if (d % tick === 0) { font(15, 500, MONO); text(String(d), PX + 44, y + Math.max(rh / 2 + 5, 11), C.dim, 'right'); }
+  }
+  // Where the simulations went at the root.
+  const vy = sy + sh + 16;
+  const total = Math.max(1, s.vis.reduce((a, b) => a + b, 0)), chosen = ['UP', 'DOWN', 'LEFT', 'RIGHT'].indexOf(s.mv);
+  const cw = (PW - 12) / 2;
+  font(15, 600);
+  ['UP', 'DOWN', 'LEFT', 'RIGHT'].forEach((name, d) => {
+    const x = PX + (d % 2) * (cw + 12), y = vy + (d >> 1) * 58, share = lerp(prev.vis[d] / Math.max(1, prev.vis.reduce((a, b) => a + b, 0)), s.vis[d] / total, u);
+    panel(x, y, cw, 48, 8, C.panel);
+    const hot = d === chosen, colour = hot ? AGENT.trail : s.vis[d] ? C.muted : '#333b4b';
+    arrow(x + 24, y + 24, d, colour);
+    panel(x + 46, y + 18, cw - 130, 12, 6, '#1a2130');
+    if (share > 0.004) panel(x + 46, y + 18, Math.max(8, (cw - 130) * share), 12, 6, hot ? AGENT.trail : C.dim);
+    font(22, 600, MONO);
+    digits(Math.round(share * 100) + '%', x + cw - 12, y + 32, hot ? C.fg : C.muted, 14);
+  });
+  g.restore();
+}
+
+function arrow(x, y, d, colour) {
+  g.save();
+  g.translate(x, y); g.rotate([0, Math.PI, -Math.PI / 2, Math.PI / 2][d]);
+  g.fillStyle = colour;
+  g.beginPath(); g.moveTo(0, -11); g.lineTo(10, 3); g.lineTo(4, 3); g.lineTo(4, 11); g.lineTo(-4, 11); g.lineTo(-4, 3); g.lineTo(-10, 3); g.closePath(); g.fill();
+  g.restore();
+}
+
+function drawLegend(t, k) {
+  const y = 952, h = 96, gap = 14, w = (G.bw * CELL - gap * (G.n - 1)) / G.n, { alive } = boardAt(k), zones = zonesAt(k);
+  for (let p = 0; p < G.n; p++) {
+    const x = BX + p * (w + gap), col = G.colour[p], mine = p === G.seat;
+    g.save();
+    g.globalAlpha = alive[p] ? 1 : 0.42;
+    panel(x, y, w, h, 12, C.panel);
+    if (mine) { g.strokeStyle = rgba(AGENT.trail, 0.7); g.lineWidth = 2; g.beginPath(); g.roundRect(x, y, w, h, 12); g.stroke(); }
+    g.fillStyle = col.trail; g.beginPath(); g.roundRect(x + 14, y + 16, 8, h - 32, 4); g.fill();
+    font(27, 700);
+    text(G.labels[p], x + 36, y + 42, col.trail);
+    font(19, 400);
+    if (!alive[p]) {
+      text(`out in round ${G.plies[G.deathPly[p]].round + 1}  ·  ${ordinal(G.place[p])}`, x + 36, y + 74, C.fg);
+    } else if (mine) {
+      text(`${num(G.game.meta.sims)} simulations`, x + 36, y + 74, C.muted);
+    } else {
+      const said = G.botSaid[p], q = countUpTo(said.map(s => s.t), t) - 1;
+      text(q >= 0 ? `search depth ${said[q].depth}` : 'alpha-beta search', x + 36, y + 74, C.muted);
+    }
+    if (alive[p]) {
+      font(31, 600, MONO);
+      digits(String(zones.territory[p]), x + w - 16, y + 43, C.fg, 18);
+      font(15, 500);
+      text('CELLS', x + w - 16, y + 72, C.dim, 'right', 1.5);
+    }
+    g.restore();
+  }
+}
+
+function drawBanner(t) {
+  const u = smooth((t - G.end - 0.3) / 0.6);
+  if (u <= 0) return;
+  const w = G.bw * CELL, mid = BY + G.bh * CELL / 2;
+  const who = G.winner === null || G.winner === undefined ? null : G.winner;
+  const col = who === null ? C.fg : G.colour[who].trail;
+  g.save();
+  g.globalAlpha = u;
+  g.fillStyle = 'rgba(6,8,12,0.84)'; g.fillRect(BX, mid - 120, w, 240);
+  g.fillStyle = col; g.fillRect(BX, mid - 120, w, 3); g.fillRect(BX, mid + 117, w, 3);
+  font(104, 700);
+  g.shadowColor = col; g.shadowBlur = 40;
+  text(who === null ? 'DRAW' : G.labels[who].toUpperCase() + ' WINS', BX + w / 2, mid + 18, col, 'center', 8);
+  g.shadowBlur = 0;
+  font(30, 400);
+  text(`last bike standing after ${G.rounds} rounds against ${G.n - 1} alpha-beta bots`, BX + w / 2, mid + 76, C.fg, 'center');
+  g.restore();
+}
+
+// ---------------------------------------------------------------- playback
+
+const ui = { play: document.getElementById('play'), scrub: document.getElementById('scrub'), clock: document.getElementById('clock'),
+             speed: document.getElementById('speed'), games: document.getElementById('games'), exp: document.getElementById('export'),
+             status: document.getElementById('status') };
+let now = 0, playing = false, stamp = 0, exporting = false;
+
+function seek(t) {
+  now = clamp(t, 0, G ? G.duration : 0);
+  draw(now);
+  ui.scrub.value = G ? Math.round(1000 * now / G.duration) : 0;
+  ui.clock.textContent = now.toFixed(1) + ' s';
+}
+function loop(ts) {
+  if (playing && !exporting && G) {
+    seek(now + Math.min(0.1, (ts - stamp) / 1000) * Number(ui.speed.value));
+    if (now >= G.duration) setPlaying(false);
+  }
+  stamp = ts;
+  requestAnimationFrame(loop);
+}
+function setPlaying(on) {
+  playing = on;
+  if (on && G && now >= G.duration) now = 0;
+  ui.play.textContent = on ? 'Pause' : 'Play';
+}
+async function load(name) {
+  const game = await (await fetch('games/' + name)).json();
+  G = prepare(game);
+  setPlaying(false);
+  seek(0);
+}
+ui.play.onclick = () => setPlaying(!playing);
+ui.scrub.oninput = () => { if (G) seek(G.duration * ui.scrub.value / 1000); };
+ui.games.onchange = () => load(ui.games.value);
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
+  if (e.code === 'ArrowRight' && G) seek(now + (e.shiftKey ? 1 : 1 / FPS));
+  if (e.code === 'ArrowLeft' && G) seek(now - (e.shiftKey ? 1 : 1 / FPS));
+});
+
+// ---------------------------------------------------------------- export: H.264 in an MP4
+
+const bytes = (...b) => new Uint8Array(b);
+const u16 = v => bytes(v >> 8 & 255, v & 255);
+const u32 = v => bytes(v >>> 24 & 255, v >>> 16 & 255, v >>> 8 & 255, v & 255);
+const ascii = s => Uint8Array.from(s, c => c.charCodeAt(0));
+function join(parts) {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+const box = (type, ...parts) => { const body = join(parts); return join([u32(body.length + 8), ascii(type), body]); };
+const full = (type, version, flags, ...parts) => box(type, bytes(version, flags >> 16 & 255, flags >> 8 & 255, flags & 255), ...parts);
+const MATRIX = join([u32(0x10000), u32(0), u32(0), u32(0), u32(0x10000), u32(0), u32(0), u32(0), u32(0x40000000)]);
+
+/** A one-track MP4 from the encoder's chunks: all samples in one run after the index. */
+function mux(chunks, config, fps, width, height) {
+  const scale = fps * 1000, count = chunks.length, ms = Math.round(count * 1000 / fps);
+  const avcc = new Uint8Array(config.description instanceof ArrayBuffer ? config.description : config.description.buffer.slice(config.description.byteOffset, config.description.byteOffset + config.description.byteLength));
+  const cs = config.colorSpace || {};
+  const code = { bt709: 1, bt470bg: 5, smpte170m: 6, 'iec61966-2-1': 13, rgb: 0 };
+  const colr = cs.primaries ? box('colr', ascii('nclx'), u16(code[cs.primaries] ?? 1), u16(code[cs.transfer] ?? 1), u16(code[cs.matrix] ?? 1), bytes(cs.fullRange ? 0x80 : 0)) : new Uint8Array(0);
+  const entry = box('avc1', new Uint8Array(6), u16(1), new Uint8Array(16), u16(width), u16(height), u32(0x480000), u32(0x480000), u32(0), u16(1),
+                    new Uint8Array(32), u16(24), u16(0xffff), box('avcC', avcc), colr);
+  const keys = [];
+  chunks.forEach((c, i) => { if (c.key) keys.push(u32(i + 1)); });
+  const moov = offset => box('moov',
+    full('mvhd', 0, 0, u32(0), u32(0), u32(1000), u32(ms), u32(0x10000), u16(0x100), new Uint8Array(10), MATRIX, new Uint8Array(24), u32(2)),
+    box('trak',
+      full('tkhd', 0, 3, u32(0), u32(0), u32(1), u32(0), u32(ms), new Uint8Array(8), u16(0), u16(0), u16(0), u16(0), MATRIX, u32(width << 16), u32(height << 16)),
+      box('mdia',
+        full('mdhd', 0, 0, u32(0), u32(0), u32(scale), u32(count * 1000), u16(0x55c4), u16(0)),
+        full('hdlr', 0, 0, u32(0), ascii('vide'), new Uint8Array(12), ascii('VideoHandler\0')),
+        box('minf',
+          full('vmhd', 0, 1, new Uint8Array(8)),
+          box('dinf', full('dref', 0, 0, u32(1), full('url ', 0, 1))),
+          box('stbl',
+            full('stsd', 0, 0, u32(1), entry),
+            full('stts', 0, 0, u32(1), u32(count), u32(1000)),
+            full('stss', 0, 0, u32(keys.length), ...keys),
+            full('stsc', 0, 0, u32(1), u32(1), u32(count), u32(1)),
+            full('stsz', 0, 0, u32(0), u32(count), ...chunks.map(c => u32(c.data.length))),
+            full('stco', 0, 0, u32(1), u32(offset)))))));
+  const ftyp = box('ftyp', ascii('isom'), u32(0x200), ascii('isom'), ascii('iso2'), ascii('avc1'), ascii('mp41'));
+  const head = ftyp.length + moov(0).length + 8;
+  const size = chunks.reduce((n, c) => n + c.data.length, 0);
+  return new Blob([ftyp, moov(head), u32(size + 8), ascii('mdat'), ...chunks.map(c => c.data)], { type: 'video/mp4' });
+}
+
+const breathe = () => new Promise(done => { const ch = new MessageChannel(); ch.port1.onmessage = () => done(); ch.port2.postMessage(0); });
+
+async function exportVideo(opts = {}) {
+  if (!G || exporting) return;
+  exporting = true; setPlaying(false);
+  const state = window.exportState = { done: false, frame: 0, frames: Math.ceil(G.duration * FPS), error: null, saved: null };
+  const name = opts.name || ui.games.value.replace(/\.json$/, '') + '.mp4';
+  try {
+    const chunks = [];
+    let config = null;
+    const enc = new VideoEncoder({
+      output: (chunk, meta) => {
+        const data = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(data);
+        chunks.push({ data, key: chunk.type === 'key', ts: chunk.timestamp });
+        if (!config && meta && meta.decoderConfig && meta.decoderConfig.description) config = meta.decoderConfig;
+      },
+      error: e => { state.error = String(e); },
+    });
+    enc.configure({ codec: opts.codec || 'avc1.640028', width: W, height: H, bitrate: opts.bitrate || 12e6, framerate: FPS,
+                    avc: { format: 'avc' }, latencyMode: 'quality', hardwareAcceleration: opts.hw || 'no-preference' });
+    for (let i = 0; i < state.frames && !state.error; i++) {
+      draw(i / FPS);
+      const frame = new VideoFrame(cv, { timestamp: Math.round(i * 1e6 / FPS), duration: Math.round(1e6 / FPS) });
+      enc.encode(frame, { keyFrame: i % (2 * FPS) === 0 });
+      frame.close();
+      state.frame = i + 1;
+      while (enc.encodeQueueSize > 6) await breathe();
+      if (i % 5 === 0) { ui.status.textContent = `encoding ${i + 1} / ${state.frames}`; await breathe(); }
+    }
+    if (state.error) throw new Error(state.error);
+    await enc.flush();
+    enc.close();
+    for (let i = 1; i < chunks.length; i++) if (chunks[i].ts <= chunks[i - 1].ts) throw new Error('frames came back out of order');
+    if (!config) throw new Error('the encoder gave no decoder configuration');
+    const file = mux(chunks, config, FPS, W, H);
+    const reply = await fetch('/save/' + name, { method: 'POST', body: file });
+    state.saved = await reply.json();
+    state.codec = config.codec; state.colorSpace = JSON.stringify(config.colorSpace || null);
+    ui.status.textContent = `saved ${state.saved.saved} (${(state.saved.bytes / 1e6).toFixed(1)} MB)`;
+  } catch (e) {
+    state.error = String(e);
+    ui.status.textContent = 'export failed: ' + state.error;
+  }
+  state.done = true; exporting = false;
+  seek(now);
+}
+ui.exp.onclick = () => exportVideo();
+
+/** The frame on screen (or a part of it) as a PNG in video/out. */
+async function saveFrame(name, crop) {
+  let source = cv;
+  if (crop) {
+    source = document.createElement('canvas');
+    source.width = crop[2]; source.height = crop[3];
+    source.getContext('2d').drawImage(cv, crop[0], crop[1], crop[2], crop[3], 0, 0, crop[2], crop[3]);
+  }
+  const png = await new Promise(done => source.toBlob(done, 'image/png'));
+  name = name || `${ui.games.value.replace(/\.json$/, '')}_${now.toFixed(2)}s.png`;
+  const reply = await (await fetch('/save/' + name, { method: 'POST', body: png })).json();
+  ui.status.textContent = 'saved ' + reply.saved;
+  return reply;
+}
+document.getElementById('frame').onclick = () => saveFrame();
+
+(async function start() {
+  const names = await (await fetch('games.json')).json();
+  for (const name of names) ui.games.add(new Option(name, name));
+  const want = new URLSearchParams(location.search);
+  const name = want.get('game') || names[0];
+  if (!name) { ui.status.textContent = 'no games in video/games: run tools/record_game.py'; return; }
+  ui.games.value = name;
+  await document.fonts.ready;
+  await load(name);
+  if (want.get('t')) seek(Number(want.get('t')));
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

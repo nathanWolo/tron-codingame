@@ -1,0 +1,33 @@
+Referee matches of the paste and the engine after the frame-reader and alignment fixes (14 Nov 2026).
+sprt.py with a per-death log, 4 players, 1 agent against 3 alpha-beta engines, 20 ms per move, 240 games per line,
+book refs/tron-codingame/tools/openings_4p.json, concurrency 8. Seed 12648430 is sprt.py's default.
+
+
+## engine, float weights, default seed
+n= 240  87-0-153   36.2% vs 25.0%  Elo  +92.8 +/-  23.4  LOS 100.0%  LLR  +1.21 [-2.94,+2.94]  SPRT[0,10] 4p  NPS 86k vs 938k (0.1x)
+      1 base:BLUNDER     566 base:trapped     153 dev:trapped 
+
+## paste, default seed
+n= 240  69-0-171   28.7% vs 25.0%  Elo  +33.2 +/-  24.8  LOS  90.9%  LLR  +0.41 [-2.94,+2.94]  SPRT[0,10] 4p  NPS 91k vs 924k (0.1x)
+    549 base:trapped     171 dev:trapped 
+
+## engine, float weights, seed 777
+n= 240  74-0-166   30.8% vs 25.0%  Elo  +50.5 +/-  24.3  LOS  98.1%  LLR  +0.65 [-2.94,+2.94]  SPRT[0,10] 4p  NPS 70k vs 905k (0.1x)
+    554 base:trapped     166 dev:trapped 
+
+## paste, seed 777
+n= 240  73-0-167   30.4% vs 25.0%  Elo  +47.1 +/-  24.4  LOS  97.3%  LLR  +0.60 [-2.94,+2.94]  SPRT[0,10] 4p  NPS 80k vs 922k (0.1x)
+    553 base:trapped     167 dev:trapped 
+
+## paste, seed 4242
+n= 240  77-0-163   32.1% vs 25.0%  Elo  +60.6 +/-  24.1  LOS  99.4%  LLR  +0.78 [-2.94,+2.94]  SPRT[0,10] 4p  NPS 78k vs 945k (0.1x)
+    557 base:trapped     163 dev:trapped 
+
+## engine, float weights, seed 4242
+n= 240  82-0-158   34.2% vs 25.0%  Elo  +76.9 +/-  23.7  LOS  99.9%  LLR  +1.00 [-2.94,+2.94]  SPRT[0,10] 4p  NPS 87k vs 933k (0.1x)
+    562 base:trapped     158 dev:trapped 
+
+
+Rounded weights (paste/net_q.bin) against runs/n1/nets/0040.bin, 64 simulations per move:
+4 players: {"openings": 300, "games": 1800, "score": 0.4975, "ci95": 0.0072, "pairs_lost": 89, "pairs_split": 132, "pairs_won": 79}
+2 players: {"openings": 600, "games": 1200, "score": 0.5150, "ci95": 0.0122, "pairs_lost": 19, "pairs_split": 544, "pairs_won": 37}
