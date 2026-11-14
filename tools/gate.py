@@ -12,6 +12,12 @@ Two folders hold the two sides, each an engine and the network it loads:
     python tools/gate.py screen ...        fixed simulations, in process: networks and search settings
     python tools/gate.py run ...           the referee (sprt.py) at CodinGame's speed: any change
 
+Both stages are sequential tests (SPRT, as sprt.py and fishtest run them):
+they stop as soon as the result is clear, accepting either H0, the new side
+is worth `--elo0` (default 0), or H1, it is worth `--elo1` (default 10), with
+5% error rates, and give up undecided at a cap. `--fixed` plays the whole
+cap instead. Every result is reported as Elo with a 95% interval.
+
 `screen` plays both sides inside the candidate's build, so it can compare
 two networks or two search settings (`-- --c-puct-a 0.6`), not two builds.
 `run` plays the two builds as separate processes through the CodinGame
@@ -30,9 +36,12 @@ The default budget, 56 ms, stands in for CodinGame's 95 ms on this desktop
 (crossfish measured 1.69 times CodinGame's speed here with 7 games running),
 so run at most 7 games at once and nothing else on the machine.
 
-A result counts as a pass only if its whole 95% interval is above level
-(0.5 for `screen`, 1/players for `run`); the interval comes from the spread
-between openings, each counted once.
+Elo is the logistic of the score, as sprt.py converts it: of the mean
+placement score in `screen` (0.5 is level; the two sides share each table),
+of the candidate's win rate against the field in `run` (1/players is
+level). The two scales are not the same thing and are not to be added. The
+interval comes from the spread between openings, each counted once. A
+`--fixed` result passes only if its whole interval is above 0 Elo.
 """
 from __future__ import annotations
 
@@ -40,6 +49,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -50,6 +60,8 @@ EXE = "tronzero.exe" if os.name == "nt" else "tronzero"
 BUILT = os.path.join("bin", "tronzero-dev.exe" if os.name == "nt" else "tronzero-dev")
 BOOK_SETTINGS = {2: (4000, 0.15), 3: (4000, 0.15), 4: (8000, 0.10)}  # openings, largest |value|
 BOOK_BY_DEFAULT = (2,)  # player counts that start from their balanced book unless told otherwise
+SCREEN_CAP = {2: 3000, 3: 800, 4: 600}  # openings a screen plays at most, by players
+SCREEN_BATCH = {2: 100, 3: 25, 4: 25}  # openings between two looks at the result
 
 
 def path(*parts: str) -> str:
@@ -109,12 +121,46 @@ def record(kind: str, entry: dict) -> None:
         f.write(json.dumps(entry) + "\n")
 
 
-def verdict(mean: float, ci: float, level: float) -> str:
-    if mean - ci > level:
-        return "PASS (the whole interval is above level)"
-    if mean + ci < level:
-        return "WORSE (the whole interval is below level)"
-    return "NOT SHOWN (the interval includes level)"
+def score_at(elo: float, n: int = 2) -> float:
+    """The score an Elo advantage gives against an equal field (sprt.py's `expected_score`): 1/n at 0."""
+    return 1.0 / (1.0 + (n - 1) * 10.0 ** (-elo / 400.0))
+
+
+def elo_of(score: float, n: int = 2) -> float:
+    s = min(max(score, 1e-9), 1.0 - 1e-9)
+    return 400.0 * math.log10(s / (1.0 - s) * (n - 1))
+
+
+def elo_interval(score: float, ci: float, n: int = 2) -> float:
+    """Half-width in Elo of a score's interval `ci` (first-order, as sprt.py's `elo_se`)."""
+    s = min(max(score, 1e-9), 1.0 - 1e-9)
+    return 400.0 / math.log(10.0) * ci / (s * (1.0 - s))
+
+
+def sprt_bounds(alpha: float, beta: float) -> tuple[float, float]:
+    return math.log(beta / (1.0 - alpha)), math.log((1.0 - beta) / alpha)
+
+
+def llr(mean: float, var: float, count: int, elo0: float, elo1: float, n: int = 2) -> float:
+    """Generalised SPRT log-likelihood ratio of H1 against H0 from a mean and a variance (sprt.py's `gsprt_llr`)."""
+    if count < 2 or var <= 1e-12:
+        return 0.0
+    t0, t1 = score_at(elo0, n), score_at(elo1, n)
+    return count * (t1 - t0) * (2.0 * mean - t0 - t1) / (2.0 * var)
+
+
+def verdict(decision: str, elo: float, ci: float, args: argparse.Namespace) -> str:
+    if decision == "H1":
+        return f"PASS (SPRT accepted H1, {args.elo1:g} Elo)"
+    if decision == "H0":
+        return f"NO GAIN (SPRT accepted H0, {args.elo0:g} Elo)"
+    if decision == "undecided":
+        return "UNDECIDED (reached the cap between the two bounds)"
+    if elo - ci > 0:
+        return "PASS (the whole interval is above 0)"
+    if elo + ci < 0:
+        return "WORSE (the whole interval is below 0)"
+    return "NOT SHOWN (the interval includes 0)"
 
 
 def cmd_books(args: argparse.Namespace) -> None:
@@ -135,25 +181,55 @@ def cmd_books(args: argparse.Namespace) -> None:
 def cmd_screen(args: argparse.Namespace) -> None:
     exe, net = side("dev")
     _, old_net = side("prev")
-    cmd = [exe, "match", "--a", net, "--b", old_net, "--players", str(args.players), "--pairs", str(args.openings),
-           "--sims", str(args.sims), "--seed", str(args.seed), "--threads", str(args.threads)]
-    if book_for(args):
-        cmd += ["--book", book_for(args), "--skip", str(args.skip)]
-    cmd += args.extra
-    out = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout.strip().splitlines()[-1]
-    res = json.loads(out)
-    print(out)
-    v = verdict(res["score"], res["ci95"], 0.5)
-    print(f"screen, {args.players} players, {res['games']} games on {res['openings']} openings at {args.sims} simulations: "
-          f"the new side scores {res['score']:.4f} +/- {res['ci95']:.4f} (level 0.5): {v}")
+    cap = args.openings or SCREEN_CAP[args.players]
+    step = args.batch or SCREEN_BATCH[args.players]
+    lo, hi = sprt_bounds(args.alpha, args.beta)
+    test = "fixed length" if args.fixed else f"SPRT[{args.elo0:g},{args.elo1:g}]"
+    batches: list[tuple[int, float, float]] = []  # openings, mean score, variance between openings
+    tally = {"games": 0, "pairs_lost": 0, "pairs_split": 0, "pairs_won": 0}
+    done, mean, var, decision = 0, 0.5, 0.0, "fixed" if args.fixed else "undecided"
+    while done < cap:
+        k = min(step, cap - done)
+        cmd = [exe, "match", "--a", net, "--b", old_net, "--players", str(args.players), "--pairs", str(k),
+               "--sims", str(args.sims), "--threads", str(args.threads)]
+        if book_for(args):  # one shuffled order of the book, read on from where the last batch stopped
+            cmd += ["--book", book_for(args), "--seed", str(args.seed), "--skip", str(args.skip + done)]
+        else:  # fresh uniform spawns for every batch
+            cmd += ["--seed", str(args.seed * 100003 + len(batches))]
+        cmd += args.extra
+        res = json.loads(subprocess.run(cmd, check=True, capture_output=True, text=True).stdout.strip().splitlines()[-1])
+        # The match reports its interval from the spread between openings: 1.96 * sqrt(variance / openings).
+        batches.append((k, res["score"], (res["ci95"] / 1.96) ** 2 * k))
+        for key in tally:
+            tally[key] += res[key]
+        done += k
+        mean = sum(b[0] * b[1] for b in batches) / done
+        var = (sum((b[0] - 1) * b[2] + b[0] * (b[1] - mean) ** 2 for b in batches)) / max(done - 1, 1)
+        ci = 1.96 * (var / done) ** 0.5
+        ratio = llr(mean, var, done, args.elo0, args.elo1)
+        print(f"openings {done:5d}  games {tally['games']:6d}  Elo {elo_of(mean):+6.1f} +/- {elo_interval(mean, ci):5.1f}  "
+              f"LLR {ratio:+5.2f} [{lo:+.2f},{hi:+.2f}]  {test}", flush=True)
+        if not args.fixed and done >= args.min_openings and (ratio >= hi or ratio <= lo):
+            decision = "H1" if ratio >= hi else "H0"
+            break
+    ci = 1.96 * (var / done) ** 0.5
+    res = {"openings": done, **tally, "score": round(mean, 4), "ci95": round(ci, 4), "elo": round(elo_of(mean), 1),
+           "elo_ci95": round(elo_interval(mean, ci), 1), "llr": round(llr(mean, var, done, args.elo0, args.elo1), 2)}
+    v = verdict(decision, res["elo"], res["elo_ci95"], args)
+    print(json.dumps(res))
+    print(f"screen, {args.players} players, {res['games']} games on {done} openings at {args.sims} simulations: "
+          f"Elo {res['elo']:+.1f} +/- {res['elo_ci95']:.1f} (95%), {test}: {v}")
     record("screen", {"players": args.players, "sims": args.sims, "seed": args.seed, "skip": args.skip,
-                      "book": os.path.basename(book_for(args)) or "uniform spawns",
-                      "extra": args.extra, "result": res, "verdict": v.split(" (")[0]})
+                      "book": os.path.basename(book_for(args)) or "uniform spawns", "extra": args.extra,
+                      "test": {"elo0": args.elo0, "elo1": args.elo1, "alpha": args.alpha, "beta": args.beta,
+                               "fixed": args.fixed, "cap": cap, "decision": decision},
+                      "result": res, "verdict": v.split(" (")[0]})
 
 
-def summarise(log: str, n: int) -> dict:
-    """Win rate of the candidate from a referee log, each opening counted once."""
-    seen, blocks, repeats = set(), [], 0
+def summarise(log: str, n: int, elo0: float = 0.0, elo1: float = 10.0) -> dict:
+    """The candidate's win rate and Elo from a referee log, each opening counted once; the
+    likelihood ratio is the referee's own, over single games."""
+    seen, blocks, repeats, per_game = set(), [], 0, []
     endings: dict[str, int] = {}
     nodes = {"dev": [0, 0], "base": [0, 0]}
     with open(log, encoding="utf-8") as f:
@@ -165,6 +241,7 @@ def summarise(log: str, n: int) -> dict:
                 continue
             seen.add(key)
             blocks.append(sum(b["dev_scores"]) / len(b["dev_scores"]))
+            per_game.extend(b["dev_scores"])
             for g in b["games"]:
                 why = g["reason"]
                 if any(w in why for w in ("timeout", "crash", "invalid")):
@@ -177,9 +254,15 @@ def summarise(log: str, n: int) -> dict:
     m = len(blocks)
     mean = sum(blocks) / max(m, 1)
     var = sum((x - mean) ** 2 for x in blocks) / max(m - 1, 1)
+    ci = 1.96 * (var / max(m, 1)) ** 0.5
+    g = len(per_game)
+    g_mean = sum(per_game) / max(g, 1)
+    g_var = sum((x - g_mean) ** 2 for x in per_game) / max(g - 1, 1)
     return {
-        "openings": m, "games": m * n, "repeated_openings_dropped": repeats, "win_rate": round(mean, 4),
-        "ci95": round(1.96 * (var / max(m, 1)) ** 0.5, 4), "level": round(1 / n, 4), "forfeits": endings,
+        "openings": m, "games": g, "repeated_openings_dropped": repeats, "win_rate": round(mean, 4),
+        "ci95": round(ci, 4), "level": round(1 / n, 4), "elo": round(elo_of(mean, n), 1),
+        "elo_ci95": round(elo_interval(mean, ci, n), 1), "llr": round(llr(g_mean, g_var, g, elo0, elo1, n), 2),
+        "forfeits": endings,
         "sims_per_ms": {k: round(v[0] / v[1], 2) if v[1] else None for k, v in nodes.items()},
     }
 
@@ -192,17 +275,27 @@ def cmd_run(args: argparse.Namespace) -> None:
     env = dict(os.environ)
     env.pop("TRONZERO_NET", None)  # each side loads the net.bin beside it
     cmd = [sys.executable, os.path.join(ROOT, args.sprt), "--baseline", old, "--dev", new, "--players", str(args.players),
-           "--budget-ms", str(args.budget_ms), "--book", book_for(args) or "none", "--seed-plies", "0", "--fixed",
+           "--budget-ms", str(args.budget_ms), "--book", book_for(args) or "none", "--seed-plies", "0",
            "--max-games", str(args.games), "--concurrency", str(args.workers), "--seed", str(args.seed), "--log", log,
-           "--print-every", str(args.print_every)]
-    subprocess.run(cmd, check=True, env=env)
-    res = summarise(log, args.players)
-    v = verdict(res["win_rate"], res["ci95"], 1 / args.players)
+           "--print-every", str(args.print_every), "--elo0", str(args.elo0), "--elo1", str(args.elo1),
+           "--alpha", str(args.alpha), "--beta", str(args.beta)]
+    if args.fixed:
+        cmd.append("--fixed")
+    code = subprocess.run(cmd, env=env).returncode  # sprt.py: 0 accepted H1 (or fixed), 1 accepted H0, 2 undecided
+    if code not in (0, 1, 2):
+        sys.exit(f"the referee failed (exit code {code})")
+    decision = "fixed" if args.fixed else ("H1", "H0", "undecided")[code]
+    test = "fixed length" if args.fixed else f"SPRT[{args.elo0:g},{args.elo1:g}]"
+    res = summarise(log, args.players, args.elo0, args.elo1)
+    v = verdict(decision, res["elo"], res["elo_ci95"], args)
     print(json.dumps(res))
     print(f"referee, {args.players} players at {args.budget_ms} ms, {res['games']} games on {res['openings']} openings: "
-          f"the new build wins {100 * res['win_rate']:.1f}% +/- {100 * res['ci95']:.1f} (level {100 / args.players:.1f}%): {v}")
+          f"Elo {res['elo']:+.1f} +/- {res['elo_ci95']:.1f} (95%; wins {100 * res['win_rate']:.1f}%, level {100 / args.players:.1f}%), "
+          f"{test}: {v}")
     record("run", {"players": args.players, "budget_ms": args.budget_ms, "seed": args.seed,
                    "book": os.path.basename(book_for(args)) or "uniform spawns",
+                   "test": {"elo0": args.elo0, "elo1": args.elo1, "alpha": args.alpha, "beta": args.beta,
+                            "fixed": args.fixed, "cap": args.games, "decision": decision},
                    "log": os.path.relpath(log, ROOT).replace("\\", "/"), "result": res, "verdict": v.split(" (")[0]})
 
 
@@ -221,7 +314,9 @@ def main() -> None:
     p.add_argument("--threads", type=int, default=14)
     p = sub.add_parser("screen")
     p.add_argument("--players", type=int, default=4, choices=(2, 3, 4))
-    p.add_argument("--openings", type=int, default=200)
+    p.add_argument("--openings", type=int, default=0, help="the cap: openings played at most (default 600; duels 3000)")
+    p.add_argument("--batch", type=int, default=0, help="openings between two looks at the result (default 25; duels 100)")
+    p.add_argument("--min-openings", type=int, default=50, help="no decision before this many openings")
     p.add_argument("--sims", type=int, default=2000, help="simulations per move (about what 95 ms buys on CodinGame)")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--skip", type=int, default=0, help="start this far into the seed's order of book openings")
@@ -230,13 +325,20 @@ def main() -> None:
     p.add_argument("extra", nargs="*", help="after --: settings for `tronzero match`, such as --c-puct-a 0.6")
     p = sub.add_parser("run")
     p.add_argument("--players", type=int, default=4, choices=(2, 3, 4))
-    p.add_argument("--games", type=int, default=1200)
+    p.add_argument("--games", type=int, default=3000, help="the cap: games played at most")
     p.add_argument("--budget-ms", type=int, default=56)
     p.add_argument("--workers", type=int, default=7)
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--print-every", type=int, default=100)
     p.add_argument("--book", default="", help="opening book, or 'none' for uniform spawns")
     p.add_argument("--sprt", default="legacy/alpha-beta/tools/sprt.py")
+    for name in ("screen", "run"):
+        p = sub.choices[name]
+        p.add_argument("--elo0", type=float, default=0.0, help="H0: the new side is worth this much Elo")
+        p.add_argument("--elo1", type=float, default=10.0, help="H1: it is worth this much")
+        p.add_argument("--alpha", type=float, default=0.05, help="chance of accepting H1 when H0 holds")
+        p.add_argument("--beta", type=float, default=0.05, help="chance of accepting H0 when H1 holds")
+        p.add_argument("--fixed", action="store_true", help="play the whole cap, no early stop")
     args = ap.parse_args()
     if args.cmd in ("freeze", "dev"):
         stage("prev" if args.cmd == "freeze" else "dev", args)

@@ -1,4 +1,4 @@
-Staged 2026-11-14 10:02
-engine  bin\tronzero-dev.exe  sha256 4d47222cb18dd6451ce14a09f479907b3750ba077b7df02c9c02b090c490021b
+Staged 2026-11-14 11:32
+engine  bin/tronzero-c06.exe  sha256 dba554c360b83abbb9b2606f97d4b004b6d571165eabd7974f2d280a259237ca
 network runs/n1/nets/0040.bin  sha256 c7e7e3df719a05e73cdfdd04933f617b899d0a5d6b62dd27ef71b2b01fcde699
-Current build: the frozen engine plus the openings command and --book; same search.
+Exploration constant 0.6 instead of 1.0; otherwise the frozen engine's search.

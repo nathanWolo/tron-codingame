@@ -1,4 +1,4 @@
-Frozen 2026-11-14 10:02
-engine  bin/tronzero.exe  sha256 854aebaef45e9df53a3ea76e6edd920ec0cad3072829bcf7833db74de58bf503
+Frozen 2026-11-14 12:22
+engine  bin/tronzero-dev.exe  sha256 245777a84e8807e9409c677c9ab7b1989216cc3f707710392081f0e1f6156397
 network runs/n1/nets/0040.bin  sha256 c7e7e3df719a05e73cdfdd04933f617b899d0a5d6b62dd27ef71b2b01fcde699
-The engine the CodinGame paste of 14 Nov 2026 was checked against: generation 40, c_puct 1.0, fpu 0.2, no tree reuse.
+Exploration constant 0.6 (was 1.0), accepted 14 Nov 2026: +8.0 +/- 6.4 Elo four players and +11.6 +/- 22.1 in duels at 2,000 simulations, +6.1 +/- 20.5 through the referee at 56 ms. Generation 40, fpu 0.2, no tree reuse.

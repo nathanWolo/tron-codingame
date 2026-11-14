@@ -1541,7 +1541,7 @@ let _ = std::io::stdout().flush();
 fn main() {
 let started = std::time::Instant::now();
 let net = net::Net::from_packed(NET);
-play::run(&net, &mcts::Params { c_puct: 1.0, fpu_reduction: 0.2 }, started);
+play::run(&net, &mcts::Params { c_puct: 0.6, fpu_reduction: 0.2 }, started);
 }
 const NET: &str = "\
 分來丰蠍羬膞眑萹艂燓瘕掎岆婐勧蛒瘎泼簀蠁絊憡刔改訣啃痻穤岃悛竨嗷婎槼哸蟀棥膢畲噽瞝哈泚剩硢艳谾掆檖俖蔡墎玿蟋眕蒧脡瞭蠆蚣肂畆襟檠侠琥燊奙滢癒萣硳槭剼婤歛栣嘾嘶倈亝癳専初璩癦萔撿塎琘潮塬佘蚂寄是滁晆灦薜俫晰理嗨繠谿瑹蓌嶂丗膟桼壵藔栩葘訡襢栔蘇秖僃忥衻菃疮懦嫊薜喉谚亩渾么翣椵桍畺矚人吢睽枣盎烂潇璚啰谙噢橎撨疡罶什痧汾熧紡美柊撆湎嶸曠涀萺琧熹繷焝聾澍薜澭萇蠡炃翩撐櫵笸嚜幾考癖止儈璙彿砀蚙灝檦瞘荸尟皅渂侷猣殓珚蚡溆唈梛犆褜哏滊埸凥貌濓坲爎歗梣睷篪喾猢垧糜桸濨昆沆儅襞啶聂喲清艖梎剸瞫斵汝趗浝熍翜畹瀡豕滝熃\

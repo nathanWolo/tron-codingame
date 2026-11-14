@@ -118,37 +118,65 @@ built from. A candidate is staged in `gate/dev` and has to beat it:
 
 ```bash
 python tools/gate.py dev --note "what changed"                      # bin/tronzero-dev.exe + network -> gate/dev
-python tools/gate.py screen --players 4 --openings 200 --seed 301   # fixed simulations, in process
-python tools/gate.py screen --players 2 --openings 300 --seed 302
-python tools/gate.py run --players 4 --games 1200 --seed 303        # the referee, on the clock
+python tools/gate.py screen --players 4 --seed 301                  # fixed simulations, in process
+python tools/gate.py screen --players 2 --seed 302
+python tools/gate.py run --players 4 --seed 303                     # the referee, on the clock
 python tools/gate.py freeze --force --note "what was accepted"      # the candidate becomes the baseline
 ```
 
+Both stages are sequential tests (SPRT) and report Elo with a 95% interval.
+A test stops as soon as the result is clear, accepting H0 (the new side is
+worth `--elo0`, 0 by default) or H1 (`--elo1`, 10 by default) with 5% error
+rates, and stops undecided at a cap (`--openings`, `--games`). `--fixed`
+plays the whole cap instead and passes only if the whole interval is above 0.
+For a change that should cost nothing, test `--elo0 -10 --elo1 0`.
+
 - `screen` plays `tronzero match` at 2,000 simulations a move, about what a
-  CodinGame turn gives, every opening from every seat. It compares two
-  networks or two search settings inside one build; a setting needs no
-  rebuild (`-- --c-puct-a 0.6 --c-puct-b 1.0`). It does not depend on the
-  clock, so other work may run beside it.
+  CodinGame turn gives, every opening from every seat, and looks at the
+  result every 25 openings (100 in duels). It compares two networks or two
+  search settings inside one build; a setting needs no rebuild
+  (`-- --c-puct-a 0.6 --c-puct-b 1.0`). It does not depend on the clock, so
+  other work may run beside it.
 - `run` plays the two builds as separate processes through the referee,
-  `legacy/alpha-beta/tools/sprt.py`, one candidate against copies of the baseline, at 56 ms a move
-  with 7 games at once: on this desktop that is the number of simulations
-  CodinGame's 95 ms gives (crossfish measured the desktop at 1.69 times
-  CodinGame's speed under that load). Nothing else should be running.
-- A result passes only if its whole 95% interval is above level (0.5 for
-  `screen`, 1/players for `run`). Decide what counts before looking, and give
-  every test a seed that has not been used: a first reading of 0.529 for a
-  lower exploration constant shrank to 0.510 on fresh openings.
+  `legacy/alpha-beta/tools/sprt.py`, which runs the SPRT itself: one
+  candidate against copies of the baseline, at 56 ms a move with 7 games at
+  once. On this desktop that is the number of simulations CodinGame's 95 ms
+  gives (crossfish measured the desktop at 1.69 times CodinGame's speed
+  under that load). Nothing else should be running.
+- Elo is the logistic of the score, as `sprt.py` converts it: of the mean
+  placement score in `screen` (0.5 is level; the two sides share each table)
+  and of the candidate's win rate against the field in `run` (1/players is
+  level). The two scales measure different things; do not add them. The
+  interval comes from the spread between openings, each counted once.
+- How long a test takes depends on the spread. A four-player opening in
+  `screen` spreads about 46 Elo, so SPRT[0,10] decides in about 125 openings
+  when the truth sits on either bound; a duel opening spreads about 195 Elo
+  and needs about 2,200. In `run` a four-player game is a win or a loss:
+  10 Elo takes about 9,000 games, 20 Elo about 2,200, 40 Elo about 500, so
+  the referee stops early only on clear differences.
+- Give every test a seed that has not been used, and decide the bounds
+  before looking: a first reading of +20 Elo for a lower exploration
+  constant shrank to +7 on fresh openings.
 - Every result is appended to `gate/logs/results.jsonl`.
+
+Accepted so far, each against the build before it:
+
+| Change | Four players, 2,000 simulations | Duels, 2,000 simulations | Referee, four players at 56 ms |
+|---|---|---|---|
+| Exploration constant 0.6 for 1.0 (14 Nov 2026) | +8.0 +/- 6.4 Elo, 1,200 games | +11.6 +/- 22.1 Elo, 600 games | +6.1 +/- 20.5 Elo, 1,200 games |
+
+That first test was run at fixed length, before the gate ran SPRTs. The
+referee neither confirms nor contradicts so small a gain; it showed that the
+change costs nothing on the clock (61 simulations per ms against 63).
 
 Duels start from `openings/balanced_2p.json`, spawns the frozen engine rates
 within 0.15 of even (`python tools/gate.py books` rebuilds the books). The
 network calls most random duel spawns nearly decided (median |value| 0.89;
 1 in 21 is within 0.15), and a decided spawn says nothing about a change:
-doubling the simulations from 1,000 to 2,000 scored 0.518 +/- 0.022 from
-random spawns and 0.605 +/- 0.038 from the book over the same 400 games. With
-four players the book made no difference (0.523 +/- 0.015 against 0.518 +/-
-0.012), so three- and four-player tests start from uniform spawns, as
-CodinGame does.
+doubling the simulations from 1,000 to 2,000 measured +12 +/- 16 Elo from
+random spawns and +74 +/- 28 from the book over the same 400 games. With
+four players the book made no difference (+16 +/- 11 against +13 +/- 8), so
+three- and four-player tests start from uniform spawns, as CodinGame does.
 
 ## Replay and video
 

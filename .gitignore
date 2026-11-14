@@ -23,3 +23,6 @@ __pycache__/
 /gate/*/tronzero.exe
 /gate/*/tronzero
 /gate/*/net.bin
+
+# raw per-game logs of referee runs; gate/logs/results.jsonl keeps every result
+/gate/logs/run_*.jsonl

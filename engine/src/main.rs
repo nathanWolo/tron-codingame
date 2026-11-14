@@ -60,7 +60,7 @@ fn load_net(path: &str) -> Net {
 
 /// The search settings when no flag overrides them. The paste carries the
 /// same two: `tools/make_paste.py` reads them from here.
-pub const C_PUCT: f32 = 1.0;
+pub const C_PUCT: f32 = 0.6;
 pub const FPU_REDUCTION: f32 = 0.2;
 
 fn search_params() -> Params {
