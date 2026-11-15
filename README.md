@@ -33,7 +33,9 @@ tools/paste_check.py  checks a build of the paste against the engine, move for m
 tools/gate.py         new build against old build: the test a change has to pass
 tools/record_game.py  records the agent against alpha-beta bots, with its search statistics
 tools/video_server.py serves video/replay.html and saves what it exports
+tools/cg.py           CodinGame's API: test games on its machines, submitting, the ranking
 paste/                tronzero_paste.rs (the submission) and the weights it embeds
+arena/                submissions.jsonl: what each CodinGame submission was and how it ended
 gate/                 prev/ (the frozen baseline), dev/ (the candidate), logs/ (every result)
 openings/             balanced_2p.json, balanced_4p.json: spawns the frozen engine rates even
 video/                replay.html (replay page, MP4 export), games/ (recordings), out/
@@ -131,18 +133,19 @@ rates, and stops undecided at a cap (`--openings`, `--games`). `--fixed`
 plays the whole cap instead and passes only if the whole interval is above 0.
 For a change that should cost nothing, test `--elo0 -10 --elo1 0`.
 
-- `screen` plays `tronzero match` at 2,000 simulations a move, about what a
-  CodinGame turn gives, every opening from every seat, and looks at the
+- `screen` plays `tronzero match` at the simulations a CodinGame turn gives
+  (1,250 a move with four players, 1,550 with three, 1,800 in duels;
+  `--sims` overrides), every opening from every seat, and looks at the
   result every 25 openings (100 in duels). It compares two networks or two
   search settings inside one build; a setting needs no rebuild
   (`-- --c-puct-a 0.6 --c-puct-b 1.0`). It does not depend on the clock, so
   other work may run beside it.
 - `run` plays the two builds as separate processes through the referee,
   `legacy/alpha-beta/tools/sprt.py`, which runs the SPRT itself: one
-  candidate against copies of the baseline, at 56 ms a move with 7 games at
-  once. On this desktop that is the number of simulations CodinGame's 95 ms
-  gives (crossfish measured the desktop at 1.69 times CodinGame's speed
-  under that load). Nothing else should be running.
+  candidate against copies of the baseline, at 52 ms a move with 7 games at
+  once. Under that load this desktop runs the engine at 1.6 to 2.0 times
+  CodinGame's speed, so 52 ms stands for CodinGame's 95 (see "CodinGame
+  arena"). Nothing else should be running.
 - Elo is the logistic of the score, as `sprt.py` converts it: of the mean
   placement score in `screen` (0.5 is level; the two sides share each table)
   and of the candidate's win rate against the field in `run` (1/players is
@@ -165,9 +168,15 @@ Accepted so far, each against the build before it:
 |---|---|---|---|
 | Exploration constant 0.6 for 1.0 (14 Nov 2026) | +8.0 +/- 6.4 Elo, 1,200 games | +11.6 +/- 22.1 Elo, 600 games | +6.1 +/- 20.5 Elo, 1,200 games |
 
-That first test was run at fixed length, before the gate ran SPRTs. The
+That first test was run at fixed length, before the gate ran SPRTs, and
+before its settings were measured on CodinGame: at 2,000 simulations where a
+four-player turn there gives 1,250, and at 56 ms where 52 is the match. The
 referee neither confirms nor contradicts so small a gain; it showed that the
 change costs nothing on the clock (61 simulations per ms against 63).
+
+Tested again at CodinGame's speed, four players at 1,250 simulations, as an
+SPRT on fresh openings (seed 304): +8.5 +/- 6.5 Elo over 1,650 games on 275
+openings, where the test stopped and accepted H1.
 
 Duels start from `openings/balanced_2p.json`, spawns the frozen engine rates
 within 0.15 of even (`python tools/gate.py books` rebuilds the books). The
@@ -201,8 +210,8 @@ faster. `Export MP4` encodes the replay in the browser (H.264, 1920x1080, 30
 frames a second) and saves it to `video/out/`; `Save frame` saves a PNG. The
 export needs a Chromium browser, for its video encoder.
 
-The agent thinks for a fixed 2,000 simulations a move in a recording (about
-what a CodinGame turn gives it), so a game does not depend on what else the
+The agent thinks for a fixed 2,000 simulations a move in a recording (a
+CodinGame turn gives it 1,250 with four bikes alive), so a game does not depend on what else the
 machine is doing; the bots get `--budget-ms`, 100 by default. The agent's
 statistics come from a line it prints when `TZ_STATS` is set; that code is
 left out of the paste.
@@ -221,7 +230,7 @@ number of simulations per move, which makes its play repeatable.
 `paste/tronzero_paste.rs` is the submission: one Rust file of 95,566
 characters (CodinGame allows 100,000) holding the engine and the weights of
 `runs/n1/nets/0040.bin`. Paste it into the Tron Battle IDE with the language
-set to Rust.
+set to Rust, or send it with `tools/cg.py` (see "CodinGame arena").
 
 Build it again after changing the engine or the network:
 
@@ -291,20 +300,73 @@ When submitting:
   paste are the thinking time per turn. Lower them if a turn ever times out.
 - Every searched turn prints `DIR mm SCORE Tms n=SIMS d=0 a=ALIVE` to stderr;
   `n` is the number of simulations CodinGame's machine managed.
-- CodinGame's IDE compiles Rust without optimisation, the arena with it. In
-  the IDE expect a few dozen simulations per turn and much weaker play than
-  the submitted bot.
+- Test games started through CodinGame's API run an optimised build: about
+  1,050 simulations in the first turn. crossfish's notes say the IDE compiles
+  Rust without optimisation; a few dozen simulations per turn would be the
+  sign of that.
 - The kernels use AVX2 and FMA when the CPU reports them and plain loops at
   about half the speed otherwise.
 
+## CodinGame arena
+
+`tools/cg.py` talks to CodinGame's public API
+(https://www.codingame.com/api/v1/docs). It signs in once through the
+browser, runs test games on CodinGame's machines, submits the paste and reads
+the ranking. The token is kept in `~/.config/codingame/token` and can be
+revoked at https://www.codingame.com/settings/tokens.
+
+```bash
+python tools/cg.py login       # prints a link and a code to approve in the browser
+python tools/cg.py wait        # saves the token once the code is approved
+python tools/cg.py test paste/tronzero_paste.rs --opponents default,default,default --stderr 3
+python tools/cg.py submit paste/tronzero_paste.rs    # replaces the arena submission
+python tools/cg.py follow      # the ranking, until every ranking game is played
+python tools/cg.py battles     # placements of the current submission, by table size
+```
+
+A submission replaces the one in the arena and its score starts again from
+nothing. CodinGame keeps no score history, so `arena/submissions.jsonl`
+records what each submission was and how it ended.
+
+| Submitted (UTC) | Commit | What | Score | Rank |
+|---|---|---|---|---|
+| 14 Nov 2026 16:42 | `eee4a11` | generation 40, exploration constant 1.0 | 37.17 | 1 of 8,285 |
+| 14 Nov 2026 21:51 | `67cd001` | exploration constant 0.6 | 37.15 | 1 of 8,285 |
+
+Each took about 1,600 ranking games over an hour and forty minutes. The
+arena cannot tell the two apart: in its four-player games the second placed
++8 +/- 19 Elo above the first by mean placement and -8 +/- 29 by first
+places (29.6% then 28.6%), against opponents drawn afresh each time. A gain
+of the size the gate measured, +8.5 +/- 6.5, needs the gate to see it.
+
+Measured on CodinGame's machines in seven test games on 14 Nov 2026, from
+the `n=` the paste prints:
+
+- Simulations in a 94 ms turn, medians: 1,250 with four bikes alive (71
+  turns of one game), 1,552 with three (45 turns), 1,827 with two (148
+  turns). The opponents were the bots ranked 2 to 4.
+- First turn, about 76 ms including unpacking the weights: 982 to 1,111 with
+  four players (five games), 1,377 in a duel.
+- No error and no late move in 762 turns.
+
+The same engine on this desktop:
+
+- One game alone: 2,733 simulations in the first turn, about 2.5 times
+  CodinGame.
+- Seven at once, as the gate's referee stage runs them: a median of 1,500
+  simulations in a 56 ms first turn with four players and 1,736 in a duel.
+  Per ms that is 2.0 and 1.6 times CodinGame, where crossfish measured 1.69
+  for its own engine under the same load.
+
+So the referee stage's old 56 ms was close: it gave a fifth more simulations
+than CodinGame with four players and a twentieth fewer in duels. It is now
+52 ms. The screens were further off: 2,000 simulations a move where a
+four-player turn on CodinGame gives 1,250. They now play at the medians
+above.
+
 ## Not done
 
-- Nothing has been submitted to CodinGame. crossfish's notes
-  (`documentation/native_build.md` in https://github.com/nathanWolo/crossfish) settle three things that
-  were open: CodinGame counts UTF-16 units, so this file is 95,566 characters
-  to it (211,932 bytes as UTF-8); its CPUs report AVX2 and FMA; and they run
-  at about 0.59 of this desktop's speed, so a 95 ms turn should give about
-  2,000 simulations where the desktop gives 3,400. Still not known: which
-  Rust version it compiles with (the paste builds on 1.59 and 1.97, editions
-  2018 and 2021). The `n=` on the first submitted game's stderr tells whether
-  the build is optimised: about 2,000 if it is, a few dozen if not.
+- Not known: which Rust version CodinGame compiles with (the paste builds on
+  1.59 and 1.97, editions 2018 and 2021), and how fast the arena's own
+  machines are: ranking games carry no stderr, so the figures above come from
+  test games only.

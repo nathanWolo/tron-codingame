@@ -32,9 +32,14 @@ three or four players a book made no difference (0.523 +/- 0.015 against
 0.518 +/- 0.012), so those games start from uniform random spawns, as on
 CodinGame; `--book FILE` overrides either choice.
 
-The default budget, 56 ms, stands in for CodinGame's 95 ms on this desktop
-(crossfish measured 1.69 times CodinGame's speed here with 7 games running),
-so run at most 7 games at once and nothing else on the machine.
+Both stages are set to what the engine gets on CodinGame, measured there in
+test games on 14 Nov 2026 (README, "CodinGame arena"). A 94 ms turn gave a
+median of 1,250 simulations with four bikes alive, 1,550 with three and
+1,800 with two: those are the simulations `screen` plays at. With 7 games
+running this desktop gave 1,500 at 56 ms with four players and 1,740 in
+duels, 1.6 to 2.0 times CodinGame's speed, so the default budget of `run`,
+52 ms, stands in for CodinGame's 95 ms. Run at most 7 games at once and
+nothing else on the machine.
 
 Elo is the logistic of the score, as sprt.py converts it: of the mean
 placement score in `screen` (0.5 is level; the two sides share each table),
@@ -62,6 +67,7 @@ BOOK_SETTINGS = {2: (4000, 0.15), 3: (4000, 0.15), 4: (8000, 0.10)}  # openings,
 BOOK_BY_DEFAULT = (2,)  # player counts that start from their balanced book unless told otherwise
 SCREEN_CAP = {2: 3000, 3: 800, 4: 600}  # openings a screen plays at most, by players
 SCREEN_BATCH = {2: 100, 3: 25, 4: 25}  # openings between two looks at the result
+SCREEN_SIMS = {2: 1800, 3: 1550, 4: 1250}  # simulations a 94 ms turn gave on CodinGame, by bikes alive
 
 
 def path(*parts: str) -> str:
@@ -183,6 +189,7 @@ def cmd_screen(args: argparse.Namespace) -> None:
     _, old_net = side("prev")
     cap = args.openings or SCREEN_CAP[args.players]
     step = args.batch or SCREEN_BATCH[args.players]
+    args.sims = args.sims or SCREEN_SIMS[args.players]
     lo, hi = sprt_bounds(args.alpha, args.beta)
     test = "fixed length" if args.fixed else f"SPRT[{args.elo0:g},{args.elo1:g}]"
     batches: list[tuple[int, float, float]] = []  # openings, mean score, variance between openings
@@ -317,7 +324,9 @@ def main() -> None:
     p.add_argument("--openings", type=int, default=0, help="the cap: openings played at most (default 600; duels 3000)")
     p.add_argument("--batch", type=int, default=0, help="openings between two looks at the result (default 25; duels 100)")
     p.add_argument("--min-openings", type=int, default=50, help="no decision before this many openings")
-    p.add_argument("--sims", type=int, default=2000, help="simulations per move (about what 95 ms buys on CodinGame)")
+    p.add_argument("--sims", type=int, default=0,
+                   help="simulations per move (default: what a CodinGame turn gives, 1250 with four players, "
+                        "1550 with three, 1800 in duels)")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--skip", type=int, default=0, help="start this far into the seed's order of book openings")
     p.add_argument("--book", default="", help="opening book, or 'none' for uniform spawns")
@@ -326,7 +335,7 @@ def main() -> None:
     p = sub.add_parser("run")
     p.add_argument("--players", type=int, default=4, choices=(2, 3, 4))
     p.add_argument("--games", type=int, default=3000, help="the cap: games played at most")
-    p.add_argument("--budget-ms", type=int, default=56)
+    p.add_argument("--budget-ms", type=int, default=52, help="ms per move; 52 here stands for CodinGame's 95")
     p.add_argument("--workers", type=int, default=7)
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--print-every", type=int, default=100)
